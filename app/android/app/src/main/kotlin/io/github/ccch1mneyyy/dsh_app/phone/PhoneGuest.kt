@@ -165,7 +165,12 @@ try {
 }
 const targets = []
 if (typeof cfg.abstract === 'string' && cfg.abstract) targets.push({ path: '\0' + cfg.abstract, what: 'unix @' + cfg.abstract })
-if (Number.isInteger(cfg.tcpPort) && cfg.tcpPort > 0) targets.push({ host: '127.0.0.1', port: cfg.tcpPort, what: 'tcp 127.0.0.1:' + cfg.tcpPort })
+if (Number.isInteger(cfg.tcpPort) && cfg.tcpPort > 0) {
+  targets.push({ host: '127.0.0.1', port: cfg.tcpPort, what: 'tcp 127.0.0.1:' + cfg.tcpPort })
+  // The system container's bridge gateway: abstract sockets are netns-scoped, so a guest in
+  // its own netns cannot reach the app's abstract socket, and 127.0.0.1 there is the guest's.
+  targets.push({ host: '10.213.0.1', port: cfg.tcpPort, what: 'tcp 10.213.0.1:' + cfg.tcpPort })
+}
 
 process.stdout.on('error', function (e) { process.exit(e.code === 'EPIPE' ? 0 : 1) })
 

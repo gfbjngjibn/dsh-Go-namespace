@@ -165,6 +165,22 @@ class RuntimePlugin :
                     result.error("launch_method_unavailable", error.message, null)
                 }
             }
+            "setLanAccess" -> {
+                try {
+                    controller.setLanAccess(call.argument<Boolean>("enabled") == true)
+                    result.success(null)
+                } catch (error: IllegalStateException) {
+                    result.error("lan_access_unavailable", error.message, null)
+                }
+            }
+            "setDockerTakeover" -> {
+                try {
+                    controller.setDockerTakeover(call.argument<Boolean>("enabled") == true)
+                    result.success(null)
+                } catch (error: IllegalStateException) {
+                    result.error("docker_takeover_unavailable", error.message, null)
+                }
+            }
             "systemContainer" -> controller.systemContainer(call.argument<String>("action") ?: "", call.argument<String>("name")) { error ->
                 if (error == null) result.success(null) else result.error("system_container_failed", error.message, null)
             }

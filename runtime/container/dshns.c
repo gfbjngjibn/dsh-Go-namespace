@@ -2,8 +2,8 @@
 // (`su -W --ksu-no-new-privs -c ...`), statically linked against bionic.
 //
 //   dshns start  --name N --state DIR --rootfs DIR --uid U --gid G [--groups G1,G2...] --range BASE:COUNT
-//                [--bind HOST:GUEST[:ro]]... [--storage IMG --storage-size BYTES]
-//   dshns exec   --name N --state DIR [--cwd DIR] -- ARGV...
+//                [--bind HOST:GUEST[:ro]]... [--storage IMG --storage-size BYTES] [--net]
+//   dshns exec   --name N --state DIR [--cwd DIR] [--forward PORT] -- ARGV...
 //   dshns stop   --name N --state DIR [--timeout SECONDS]
 //   dshns status --name N --state DIR
 //   dshns run    (start's options) -- ARGV
@@ -15,9 +15,14 @@
 // other uids map to an unused host range for system users. systemd runs as
 // PID 1 in a delegated cgroup2 subtree, so it can manage its own services and
 // the container leaves the app's cgroup (and Android's phantom process killer).
-// The host network is shared. The container's root keeps the app's
-// supplementary groups (unmapped inside, so shown as nogroup): with them it
-// reaches what the app reaches, such as /storage.
+// The container gets its own network namespace: CLONE_NEWNET is part of the
+// same clone as CLONE_NEWUSER, so the namespace belongs to the container's
+// user namespace and root inside can manage it (Docker needs that). The
+// monitor, real root in the host namespace, wires the host side (bridge, veth,
+// NAT and the Android policy rules that make the container follow the app's
+// own uplink, VPN included) and keeps them alive. The container's root keeps
+// the app's supplementary groups (unmapped inside, so shown as nogroup): with
+// them it reaches what the app reaches, such as /storage.
 //
 // Adapted in part from Droidspaces (GPL-3.0-or-later, Copyright (C) 2026
 // ravindu644): the /dev layout, devpts and console, the cgroup2 container
@@ -33,6 +38,7 @@
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/loop.h>
+#include <linux/openat2.h>
 #include <linux/seccomp.h>
 #include <poll.h>
 #include <sched.h>
@@ -47,6 +53,7 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
@@ -58,6 +65,8 @@
 #define CG_ROOT "/sys/fs/cgroup/dsh-go"
 #define OWNERSHIP "/var/lib/dsh-go/ownership.tsv"
 #define CONSOLE_CAP (1 << 20)
+// How long stop waits for a dead container's monitor to finish its teardown.
+#define TEARDOWN_WAIT_S 10
 // systemd's "SIGRTMIN+3" (halt) in the guest's glibc numbering. Bionic's
 // SIGRTMIN is a different number, so never write SIGRTMIN+3 here.
 #define SYSTEMD_HALT 37
@@ -88,6 +97,8 @@ static struct {
   int ngroups;
   struct bind binds[64];
   int nbinds, timeout;
+  int net;             // create a network namespace and wire the host side
+  int forward;         // `exec`: host loopback port to forward into the netns
   char **argv;
 } opt = {.cwd = "/", .timeout = 60};
 
@@ -475,6 +486,9 @@ static void child_fail(int booted, const char *what) {
   _exit(EXIT_FAIL);
 }
 
+static void child_network(void);
+static void fix_iptables_legacy(void);
+
 // PID 1 of the new namespaces. Waits for the monitor to write the uid maps and
 // move it into its cgroup, builds the root, then execs systemd.
 static int container_main(void *arg) {
@@ -528,6 +542,9 @@ static int container_main(void *arg) {
     child_fail(p->booted, "detach old root");
   rmdir("/.old_root");
   apply_ownership();
+  fix_iptables_legacy();
+  if (opt.net)
+    child_network();
   seccomp_guard();
 
   char *env[] = {"container=dsh-go", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -682,12 +699,58 @@ static int loop_attach(int img, char *dev, size_t size) {
   return fd;
 }
 
-// guest path in the rootfs, made and owned by the container's root.
-static void guest_dir(char *buf, size_t size, const char *guest, mode_t mode) {
-  snprintf(buf, size, "%s/%s", opt.rootfs, guest);
-  if (mkdir_p(buf, mode) < 0 || chown(buf, opt.uid, opt.gid) < 0)
-    die("cannot create %s: %s", buf, strerror(errno));
+// Opens REL under ROOT as if ROOT were `/` (O_PATH). What lies below ROOT is
+// the container's to change: a symlink there must never lead this process,
+// real root on the host, out of it.
+static int open_in(int root, const char *rel) {
+  struct open_how how = {.flags = O_PATH | O_DIRECTORY | O_CLOEXEC,
+                         .resolve = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS};
+  return (int)syscall(__NR_openat2, root, rel, &how, sizeof(how));
 }
+
+// A directory REL under ROOT, made (MODE) where missing and owned by the
+// container's root; an O_PATH fd for it, resolved inside ROOT only.
+static int dir_in(int root, const char *rel, mode_t mode) {
+  char path[4096];
+  snprintf(path, sizeof(path), "%s", rel);
+  for (char *p = path;; p++) {
+    if (*p != '/' && *p)
+      continue;
+    char saved = *p;
+    *p = 0;
+    if (path[0]) {
+      int fd = open_in(root, path);
+      if (fd < 0 && errno == ENOENT) {
+        char *slash = strrchr(path, '/');
+        int parent = slash ? (*slash = 0, open_in(root, path)) : open_in(root, ".");
+        if (slash)
+          *slash = '/';
+        if (parent < 0)
+          return -1;
+        int made = mkdirat(parent, slash ? slash + 1 : path, mode);
+        close(parent);
+        if (made < 0 && errno != EEXIST)
+          return -1;
+        fd = open_in(root, path);
+      }
+      if (fd < 0)
+        return -1;
+      if (!saved) {
+        if (fchownat(fd, "", opt.uid, opt.gid, AT_EMPTY_PATH) < 0) {
+          close(fd);
+          return -1;
+        }
+        return fd;
+      }
+      close(fd);
+    }
+    *p = saved;
+    if (!saved)
+      return -1;
+  }
+}
+
+static void fd_path(char *buf, size_t size, int fd) { snprintf(buf, size, "/proc/self/fd/%d", fd); }
 
 // Creates, checks, grows (after `dshns grow` while stopped) and mounts the
 // image, then binds its docker, containerd (Docker's image store) and
@@ -714,15 +777,19 @@ static void storage_attach(void) {
     if (resized != 0)
       say("storage stays at %lld bytes: e2fsck -f exit %d, resize2fs exit %d", have, checked, resized);
   }
-  char dev[64], path[4096];
+  char dev[64], path[64], where[64];
   int loop = loop_attach(img, dev, sizeof(dev));
   close(img);
   if (loop < 0)
     die("no loop device for %s: %s", opt.storage, strerror(errno));
-  char mnt[4096];
-  guest_dir(mnt, sizeof(mnt), STORAGE_DIR, 0755);
-  if (mount(dev, mnt, "ext4", MS_NODEV | MS_NOATIME, "discard") < 0)
-    die("mount %s on %s: %s", dev, mnt, strerror(errno));
+  int root = open(opt.rootfs, O_PATH | O_DIRECTORY | O_CLOEXEC);
+  int mnt = root < 0 ? -1 : dir_in(root, STORAGE_DIR, 0755);
+  if (mnt < 0)
+    die("cannot create %s in the rootfs: %s", STORAGE_DIR, strerror(errno));
+  fd_path(where, sizeof(where), mnt);
+  if (mount(dev, where, "ext4", MS_NODEV | MS_NOATIME, "discard") < 0)
+    die("mount %s on %s: %s", dev, STORAGE_DIR, strerror(errno));
+  close(mnt);
   // The mount holds the device now; closing ours lets it clear with the mount.
   close(loop);
   int state = open_state("storage.dev", O_WRONLY | O_CREAT | O_TRUNC);
@@ -732,15 +799,24 @@ static void storage_attach(void) {
   }
   const char *users[][2] = {{"docker", "var/lib/docker"}, {"containerd", "var/lib/containerd"},
                             {"containers", "var/lib/containers"}};
+  // The storage's own root now; what it holds is the container's too.
+  int top = open_in(root, STORAGE_DIR);
+  if (top < 0)
+    die("open %s: %s", STORAGE_DIR, strerror(errno));
   for (size_t i = 0; i < sizeof(users) / sizeof(users[0]); i++) {
-    char inner[4096];
-    snprintf(inner, sizeof(inner), "%s/%s", mnt, users[i][0]);
-    if ((mkdir(inner, 0710) < 0 && errno != EEXIST) || chown(inner, opt.uid, opt.gid) < 0)
-      die("cannot create %s: %s", inner, strerror(errno));
-    guest_dir(path, sizeof(path), users[i][1], 0710);
-    if (mount(inner, path, NULL, MS_BIND, NULL) < 0)
-      die("bind %s: %s", path, strerror(errno));
+    int inner = dir_in(top, users[i][0], 0710);
+    int target = dir_in(root, users[i][1], 0710);
+    if (inner < 0 || target < 0)
+      die("cannot create %s: %s", users[i][1], strerror(errno));
+    fd_path(path, sizeof(path), inner);
+    fd_path(where, sizeof(where), target);
+    if (mount(path, where, NULL, MS_BIND, NULL) < 0)
+      die("bind %s: %s", users[i][1], strerror(errno));
+    close(inner);
+    close(target);
   }
+  close(top);
+  close(root);
   say("storage %s on %s", opt.storage, dev);
 }
 
@@ -752,6 +828,548 @@ static int open_state(const char *name, int flags) {
     fchown(fd, opt.uid, opt.gid);
   return fd;
 }
+
+// Network -------------------------------------------------------------------
+//
+// The container's netns is created by the clone in spawn(); the monitor (real
+// root, host netns) does the host plumbing while the child waits for its `go`
+// pipe, and the child configures eth0 after pivot_root. `exec` joins the netns;
+// `--forward PORT` maps the app's 127.0.0.1:PORT onto the engine's port inside
+// the netns, because the app keeps its loopback origin (a secure context).
+//
+// The policy rules use the app's own routing table: scan `ip rule` for the
+// first `iif lo` rule covering the app uid (a VPN's per-uid rule when one is
+// active) and point the container's traffic at that table, so it follows the
+// same uplink as the app. Without a matching uid rule, netd's default-network
+// rule (fwmark 0x0/0xffff) is used. The monitor re-checks every two seconds,
+// which also repairs whatever netd flushes.
+
+#define NET_BRIDGE "dsh-br0"
+#define NET_VETH "dsh-v0"
+#define NET_PEER "dsh-p0"
+#define NET_GW "10.213.0.1"
+#define NET_IP "10.213.0.2"
+#define NET_PREFIX 16
+#define NET_SUBNET "10.213.0.0/16"
+#define NET_RULE_TO "6060"
+#define NET_RULE_FROM "6070"
+#define IP_BIN "/system/bin/ip"
+#define IPT_BIN "/system/bin/iptables"
+
+// Runs a host tool with no output and returns its exit status (-1 if it did
+// not run at all). The platform's own ip/iptables, never a shell.
+static int run_quiet(char *const argv[]) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    int null = open("/dev/null", O_RDWR);
+    if (null >= 0) {
+      dup2(null, 1);
+      dup2(null, 2);
+      if (null > 2)
+        close(null);
+    }
+    execv(argv[0], argv);
+    _exit(127);
+  }
+  int status;
+  if (pid < 0 || waitpid(pid, &status, 0) != pid)
+    return -1;
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+}
+
+// Runs a host tool and captures stdout (`ip rule` only).
+static int capture(char *const argv[], char *out, size_t size) {
+  int fds[2];
+  if (pipe2(fds, O_CLOEXEC) < 0)
+    return -1;
+  pid_t pid = fork();
+  if (pid == 0) {
+    dup2(fds[1], 1);
+    int null = open("/dev/null", O_WRONLY);
+    if (null >= 0) {
+      dup2(null, 2);
+      if (null > 2)
+        close(null);
+    }
+    close(fds[0]);
+    close(fds[1]);
+    execv(argv[0], argv);
+    _exit(127);
+  }
+  close(fds[1]);
+  size_t used = 0;
+  for (;;) {
+    ssize_t n = read(fds[0], out + used, size - 1 - used);
+    if (n <= 0)
+      break;
+    used += (size_t)n;
+    if (used >= size - 1)
+      break;
+  }
+  out[used] = 0;
+  close(fds[0]);
+  int status;
+  if (pid < 0 || waitpid(pid, &status, 0) != pid)
+    return -1;
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+}
+
+static void net_command_failed(const char *what) { say("[net] %s failed", what); }
+
+// What the app's own traffic gets: the first `iif lo` rule covering the app
+// uid (a VPN's per-uid rule), else netd's default-network rule. A table name;
+// "!prohibit" (or "!unreachable", "!blackhole") when that first rule blocks the
+// app, as always-on VPN's lockdown does while the VPN is down, so that the
+// container is blocked too; empty when no route to the WAN was found.
+static void app_table_from(const char *buf, char *out, size_t size) {
+  out[0] = 0;
+  char fallback[64] = "";
+  const char *p = buf;
+  while (p && *p) {
+    const char *e = strchr(p, '\n');
+    size_t len = e ? (size_t)(e - p) : strlen(p);
+    char line[1024];
+    if (len >= sizeof(line))
+      len = sizeof(line) - 1;
+    memcpy(line, p, len);
+    line[len] = 0;
+    p = e ? e + 1 : NULL;
+    if (!strstr(line, "iif lo") || strstr(line, " oif "))
+      continue;
+    const char *block = strstr(line, "unreachable") ? "unreachable"
+                        : strstr(line, "prohibit")  ? "prohibit"
+                        : strstr(line, "blackhole") ? "blackhole"
+                                                    : NULL;
+    const char *lookup = strstr(line, "lookup ");
+    char table[64] = "";
+    if (lookup && (sscanf(lookup + 7, "%63s", table) != 1 || !table[0]))
+      continue;
+    const char *ur = strstr(line, "uidrange ");
+    if (ur) {
+      unsigned lo = 0, hi = 0;
+      if (sscanf(ur + 9, "%u-%u", &lo, &hi) == 2 && lo <= opt.uid && opt.uid <= hi) {
+        if (block) {
+          snprintf(out, size, "!%s", block);
+          return;
+        }
+        if (table[0]) {
+          snprintf(out, size, "%s", table);
+          return;
+        }
+      }
+      continue;
+    }
+    if (block || !table[0])
+      continue;
+    if (!fallback[0] && strstr(line, "fwmark 0x0/0xffff"))
+      snprintf(fallback, sizeof(fallback), "%s", table);
+  }
+  snprintf(out, size, "%s", fallback);
+}
+
+// iptables rules, idempotent: check with -C, insert only when missing.
+static void ipt_ensure(char *const check[], char *const add[]) {
+  if (run_quiet(check) == 0)
+    return;
+  if (run_quiet(add) != 0)
+    net_command_failed("iptables");
+}
+
+// Removes a rule when it is there.
+static void ipt_remove(char *const check[], char *const del[]) {
+  if (run_quiet(check) == 0 && run_quiet(del) != 0)
+    net_command_failed("iptables -D");
+}
+
+// The app's 「局域网访问容器」: state/lan exists while it is on.
+static int lan_open(void) {
+  char path[4096];
+  path_in(path, sizeof(path), opt.state, "lan");
+  return access(path, F_OK) == 0;
+}
+
+static void net_base_rules(void) {
+  write_file("/proc/sys/net/ipv4/ip_forward", "1");
+  char *m_chk[] = {IPT_BIN, "-w", "-t", "nat", "-C", "POSTROUTING", "-s", NET_SUBNET, "-j", "MASQUERADE", NULL};
+  char *m_add[] = {IPT_BIN, "-w", "-t", "nat", "-A", "POSTROUTING", "-s", NET_SUBNET, "-j", "MASQUERADE", NULL};
+  ipt_ensure(m_chk, m_add);
+  char *fi_chk[] = {IPT_BIN, "-w", "-C", "FORWARD", "-i", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  char *fi_add[] = {IPT_BIN, "-w", "-I", "FORWARD", "1", "-i", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  ipt_ensure(fi_chk, fi_add);
+  // Into the container: replies only. With LAN access on, anything routed to
+  // the subnet (hotspot clients, a LAN with a route to it) reaches its services.
+  int lan = lan_open();
+  char *open_chk[] = {IPT_BIN, "-w", "-C", "FORWARD", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  char *open_add[] = {IPT_BIN, "-w", "-I", "FORWARD", "1", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  char *open_del[] = {IPT_BIN, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  char *est_chk[] = {IPT_BIN, "-w", "-C", "FORWARD", "-o", NET_BRIDGE, "-m", "state", "--state", "ESTABLISHED,RELATED",
+                     "-j", "ACCEPT", NULL};
+  char *est_add[] = {IPT_BIN, "-w", "-I", "FORWARD", "1", "-o", NET_BRIDGE, "-m", "state", "--state",
+                     "ESTABLISHED,RELATED", "-j", "ACCEPT", NULL};
+  char *est_del[] = {IPT_BIN, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-m", "state", "--state", "ESTABLISHED,RELATED",
+                     "-j", "ACCEPT", NULL};
+  if (lan) {
+    ipt_ensure(open_chk, open_add);
+    ipt_remove(est_chk, est_del);
+  } else {
+    ipt_ensure(est_chk, est_add);
+    ipt_remove(open_chk, open_del);
+  }
+  static int shown = -1;
+  if (shown != lan) {
+    if (shown != -1 || lan)
+      say("[net] LAN access to the container %s", lan ? "on" : "off");
+    shown = lan;
+  }
+  // The gateway address is the container's way to the app (the phone bridge
+  // listens there): nothing else may reach it, whatever the LAN setting.
+  char *gw_chk[] = {IPT_BIN, "-w", "-C", "INPUT", "-d", NET_GW, "!", "-i", NET_BRIDGE, "-j", "DROP", NULL};
+  char *gw_add[] = {IPT_BIN, "-w", "-I", "INPUT", "1", "-d", NET_GW, "!", "-i", NET_BRIDGE, "-j", "DROP", NULL};
+  ipt_ensure(gw_chk, gw_add);
+  char *mss_chk[] = {IPT_BIN, "-w", "-t", "mangle", "-C", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j",
+                     "TCPMSS", "--clamp-mss-to-pmtu", NULL};
+  char *mss_add[] = {IPT_BIN, "-w", "-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j",
+                     "TCPMSS", "--clamp-mss-to-pmtu", NULL};
+  ipt_ensure(mss_chk, mss_add);
+}
+
+// Android policy routing. Container packets enter from the bridge, so netd's
+// fwmark rules never match them: one rule selects the app's table for the
+// container's subnet, the other sends the way back through main.
+static void net_policy(void) {
+  char *buf = malloc(65536);
+  if (!buf)
+    return;
+  char *argv[] = {IP_BIN, "rule", NULL};
+  if (capture(argv, buf, 65536) != 0) {
+    free(buf);
+    return;
+  }
+  char table[64], want[80];
+  app_table_from(buf, table, sizeof(table));
+  int blocked = table[0] == '!';
+  snprintf(want, sizeof(want), blocked ? "%s" : "lookup %s", blocked ? table + 1 : table);
+  int have_to = 0, have_from = 0;
+  char *save = NULL;
+  for (char *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+    if (!strncmp(line, NET_RULE_TO ":", strlen(NET_RULE_TO) + 1) && strstr(line, "to " NET_SUBNET) &&
+        strstr(line, "lookup main"))
+      have_to = 1;
+    if (table[0] && !strncmp(line, NET_RULE_FROM ":", strlen(NET_RULE_FROM) + 1) &&
+        strstr(line, "from " NET_SUBNET) && strstr(line, want))
+      have_from = 1;
+  }
+  free(buf);
+  if (!have_to) {
+    char *del[] = {IP_BIN, "rule", "del", "pref", NET_RULE_TO, NULL};
+    run_quiet(del);
+    char *add[] = {IP_BIN, "rule", "add", "to", NET_SUBNET, "lookup", "main", "pref", NET_RULE_TO, NULL};
+    if (run_quiet(add) != 0)
+      net_command_failed("ip rule add (host to container)");
+  }
+  if (!table[0])
+    return;
+  if (!have_from) {
+    char *del[] = {IP_BIN, "rule", "del", "pref", NET_RULE_FROM, NULL};
+    run_quiet(del);
+    char *lookup[] = {IP_BIN, "rule", "add", "from", NET_SUBNET, "lookup", table, "pref", NET_RULE_FROM, NULL};
+    char *block[] = {IP_BIN, "rule", "add", "from", NET_SUBNET, table + 1, "pref", NET_RULE_FROM, NULL};
+    if (run_quiet(blocked ? block : lookup) != 0)
+      net_command_failed("ip rule add (container WAN)");
+    else if (blocked)
+      say("[net] the app's own traffic is blocked (%s): so is the container's", table + 1);
+    else
+      say("[net] container traffic follows the app's table %s", table);
+  }
+}
+
+// The app keeps its loopback origin: it talks to 127.0.0.1:PORT. dsh web
+// refuses wildcard bind addresses, so the engine keeps binding 127.0.0.1:PORT
+// inside the container netns and this relay bridges the two: it listens in the
+// host netns and, per connection, enters the container netns and connects to
+// the engine's loopback. No host netfilter is involved.
+static void relay_all(int fd, const char *buf, size_t len) {
+  while (len > 0) {
+    ssize_t n = write(fd, buf, len);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      return;
+    }
+    buf += n;
+    len -= (size_t)n;
+  }
+}
+
+static void relay_stream(int a, int b) {
+  char buf[65536];
+  struct pollfd fds[2] = {{.fd = a, .events = POLLIN}, {.fd = b, .events = POLLIN}};
+  int open[2] = {1, 1};
+  while (open[0] || open[1]) {
+    if (poll(fds, 2, -1) < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    for (int i = 0; i < 2; i++) {
+      if (!(fds[i].revents & (POLLIN | POLLHUP | POLLERR)))
+        continue;
+      int from = fds[i].fd, to = fds[1 - i].fd;
+      ssize_t n = read(from, buf, sizeof(buf));
+      if (n > 0) {
+        relay_all(to, buf, (size_t)n);
+        continue;
+      }
+      if (n < 0 && errno == EINTR)
+        continue;
+      shutdown(to, SHUT_WR);
+      fds[i].events = 0;
+      fds[i].revents = 0;
+      open[i] = 0;
+    }
+  }
+}
+
+static void relay_one(int client, int netns_fd, int port) {
+  struct sockaddr_in addr = {
+      .sin_family = AF_INET, .sin_port = htons((uint16_t)port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+  if (setns(netns_fd, CLONE_NEWNET) < 0) {
+    say("[net] relay: enter the container netns: %s", strerror(errno));
+    return;
+  }
+  int engine = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (engine < 0)
+    return;
+  if (connect(engine, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    close(engine);
+    return;
+  }
+  relay_stream(client, engine);
+  close(engine);
+}
+
+// The relay's socket on the host's 127.0.0.1:PORT, or -1. Bound by `exec`
+// itself before the engine starts: a port someone else holds must fail the
+// launch, not leave the app talking to whoever has it.
+static int relay_listen(int port) {
+  int lfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (lfd < 0)
+    return -1;
+  int one = 1;
+  setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  struct sockaddr_in addr = {
+      .sin_family = AF_INET, .sin_port = htons((uint16_t)port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+  if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(lfd, 16) < 0) {
+    int saved = errno;
+    close(lfd);
+    errno = saved;
+    return -1;
+  }
+  return lfd;
+}
+
+// A child of `exec`, in the host netns, until the wrapper dies.
+static void relay_serve(int lfd, int port, int netns_fd) {
+  signal(SIGCHLD, SIG_IGN);
+  say("[net] forwarding 127.0.0.1:%d into the container", port);
+  for (;;) {
+    int client = accept4(lfd, NULL, NULL, SOCK_CLOEXEC);
+    if (client < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+      close(lfd);
+      prctl(PR_SET_PDEATHSIG, SIGTERM);
+      relay_one(client, netns_fd, port);
+      _exit(0);
+    }
+    close(client);
+  }
+  close(lfd);
+}
+
+// netd's tether rules: a hotspot (or USB/Bluetooth tethering) runs and needs
+// IPv4 forwarding. Unknown counts as running.
+static int tethering(void) {
+  char buf[8192];
+  char *argv[] = {IPT_BIN, "-w", "-S", "tetherctrl_FORWARD", NULL};
+  if (capture(argv, buf, sizeof(buf)) != 0)
+    return 1;
+  return strstr(buf, " -i ") || strstr(buf, " -o ");
+}
+
+// ip_forward as it was before a container first turned it on, kept in the
+// state dir (a monitor that died leaves it for the next start's cleanup).
+static void forward_remember(void) {
+  char path[4096], value = '1';
+  path_in(path, sizeof(path), opt.state, "ip_forward.orig");
+  if (access(path, F_OK) == 0)
+    return;
+  int fd = open("/proc/sys/net/ipv4/ip_forward", O_RDONLY | O_CLOEXEC);
+  if (fd >= 0) {
+    if (read(fd, &value, 1) != 1)
+      value = '1';
+    close(fd);
+  }
+  int out = open_state("ip_forward.orig", O_WRONLY | O_CREAT | O_TRUNC);
+  if (out >= 0) {
+    write(out, &value, 1);
+    close(out);
+  }
+}
+
+// Puts ip_forward back off if it was off, unless tethering needs it now.
+static void forward_restore(void) {
+  char path[4096], value = '1';
+  path_in(path, sizeof(path), opt.state, "ip_forward.orig");
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return;
+  if (read(fd, &value, 1) != 1)
+    value = '1';
+  close(fd);
+  unlink(path);
+  if (value != '0')
+    return;
+  if (tethering()) {
+    say("[net] tethering runs: ip_forward stays on");
+    return;
+  }
+  write_file("/proc/sys/net/ipv4/ip_forward", "0");
+}
+
+static void net_cleanup(void) {
+  char *m_del[] = {IPT_BIN, "-w", "-t", "nat", "-D", "POSTROUTING", "-s", NET_SUBNET, "-j", "MASQUERADE", NULL};
+  run_quiet(m_del);
+  char *fi_del[] = {IPT_BIN, "-w", "-D", "FORWARD", "-i", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  run_quiet(fi_del);
+  char *fo_del[] = {IPT_BIN, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  run_quiet(fo_del);
+  char *est_del[] = {IPT_BIN, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-m", "state", "--state", "ESTABLISHED,RELATED",
+                     "-j", "ACCEPT", NULL};
+  run_quiet(est_del);
+  char *gw_del[] = {IPT_BIN, "-w", "-D", "INPUT", "-d", NET_GW, "!", "-i", NET_BRIDGE, "-j", "DROP", NULL};
+  run_quiet(gw_del);
+  char *mss_del[] = {IPT_BIN, "-w", "-t", "mangle", "-D", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j",
+                     "TCPMSS", "--clamp-mss-to-pmtu", NULL};
+  run_quiet(mss_del);
+  char *r1[] = {IP_BIN, "rule", "del", "pref", NET_RULE_TO, NULL};
+  run_quiet(r1);
+  char *r2[] = {IP_BIN, "rule", "del", "pref", NET_RULE_FROM, NULL};
+  run_quiet(r2);
+  char *v_del[] = {IP_BIN, "link", "del", NET_VETH, NULL};
+  run_quiet(v_del);
+  char *b_del[] = {IP_BIN, "link", "del", NET_BRIDGE, NULL};
+  run_quiet(b_del);
+  forward_restore();
+}
+
+// Removes the state of a previous run, then builds a fresh bridge and veth.
+// The child is waiting on its `go` pipe, so its netns exists and has no user.
+static int net_setup(pid_t init) {
+  net_cleanup();
+  forward_remember();
+  char ns[64];
+  snprintf(ns, sizeof(ns), "/proc/%d/ns/net", (int)init);
+  char *br_add[] = {IP_BIN, "link", "add", NET_BRIDGE, "type", "bridge", NULL};
+  if (run_quiet(br_add) != 0) {
+    net_command_failed("ip link add " NET_BRIDGE);
+    return -1;
+  }
+  char gw[64];
+  snprintf(gw, sizeof(gw), NET_GW "/%d", NET_PREFIX);
+  char *br_ip[] = {IP_BIN, "addr", "add", gw, "dev", NET_BRIDGE, NULL};
+  run_quiet(br_ip);
+  char *br_up[] = {IP_BIN, "link", "set", NET_BRIDGE, "up", NULL};
+  run_quiet(br_up);
+  char *veth[] = {IP_BIN, "link", "add", NET_VETH, "type", "veth", "peer", "name", NET_PEER, "netns", ns, NULL};
+  if (run_quiet(veth) != 0) {
+    net_command_failed("ip link add " NET_VETH);
+    return -1;
+  }
+  char *master[] = {IP_BIN, "link", "set", NET_VETH, "master", NET_BRIDGE, NULL};
+  run_quiet(master);
+  char *vup[] = {IP_BIN, "link", "set", NET_VETH, "up", NULL};
+  run_quiet(vup);
+  run_quiet(br_up);
+  net_base_rules();
+  net_policy();
+  say("[net] " NET_BRIDGE " " NET_GW "/%d <-> " NET_VETH ", netns of %d", NET_PREFIX, (int)init);
+  return 0;
+}
+
+static void net_reconcile(void) {
+  if (!opt.net)
+    return;
+  net_base_rules();
+  net_policy();
+}
+
+// The image's iptables alternatives point at nft, which this kernel does not
+// have; switch them to legacy once per rootfs. Runs as the container's root
+// after pivot_root, so every path here is the container's own. A new image
+// brings a rootfs without the marker and is fixed again.
+static void fix_iptables_legacy(void) {
+  static const char *const names[] = {"/etc/alternatives/iptables", "/etc/alternatives/ip6tables"};
+  static const char *const legacy[] = {"/usr/sbin/iptables-legacy", "/usr/sbin/ip6tables-legacy"};
+  const char *done = "/var/lib/dsh-go/iptables-legacy.done";
+  if (access(done, F_OK) == 0)
+    return;
+  int saw_legacy = 0, fixed = 0;
+  for (int i = 0; i < 2; i++) {
+    char target[256];
+    if (access(legacy[i], X_OK) != 0)
+      continue;
+    saw_legacy = 1;
+    ssize_t n = readlink(names[i], target, sizeof(target) - 1);
+    if (n <= 0)
+      continue;
+    target[n] = 0;
+    if (!strstr(target, "nft"))
+      continue;
+    if (unlink(names[i]) < 0 || symlink(legacy[i], names[i]) < 0) {
+      say("[net] cannot switch %s to legacy: %s", names[i], strerror(errno));
+      continue;
+    }
+    fixed++;
+  }
+  if (!saw_legacy)
+    return;
+  mkdir_p("/var/lib/dsh-go", 0755);
+  int fd = open(done, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  if (fd >= 0)
+    close(fd);
+  if (fixed > 0)
+    say("[net] iptables switched to the legacy backend (%d)", fixed);
+}
+
+// Runs as PID 1 inside the container after pivot_root: the peer is already in
+// this netns, the container's own iproute2 configures it, then systemd starts.
+static void child_network(void) {
+  const char *ipbin = access("/usr/sbin/ip", X_OK) == 0 ? "/usr/sbin/ip" : "/sbin/ip";
+  char *down[] = {(char *)ipbin, "link", "set", NET_PEER, "down", NULL};
+  run_quiet(down);
+  char *rename[] = {(char *)ipbin, "link", "set", NET_PEER, "name", "eth0", NULL};
+  if (run_quiet(rename) != 0) {
+    say("[net] child: no %s; the container has no network", NET_PEER);
+    return;
+  }
+  char *up[] = {(char *)ipbin, "link", "set", "eth0", "up", NULL};
+  run_quiet(up);
+  char *addr[] = {(char *)ipbin, "addr", "add", NET_IP "/16", "dev", "eth0", NULL};
+  if (run_quiet(addr) != 0)
+    say("[net] child: cannot address eth0");
+  char *route[] = {(char *)ipbin, "route", "add", "default", "via", NET_GW, NULL};
+  if (run_quiet(route) != 0)
+    say("[net] child: cannot add the default route");
+  char *lo[] = {(char *)ipbin, "link", "set", "lo", "up", NULL};
+  run_quiet(lo);
+  say("[net] child: eth0 " NET_IP "/16 via " NET_GW);
+}
+
 
 // What uninstalling the app (or clearing its storage) deletes, from several
 // corners of its data: once one is gone, the files under the container are
@@ -784,7 +1402,8 @@ static const char *sentinel_gone(void) {
 
 // Drain the console into console.log, starting over past CONSOLE_CAP, until
 // the container's init exits and the console is empty; kill the container if
-// the app's data is being removed. Then clean up after it.
+// the app's data is being removed. Then clean up after it, holding the lock
+// until this process exits: the next start or run waits for the teardown.
 static void monitor(pid_t init, int master) {
   int log = open_state("console.log", O_WRONLY | O_CREAT | O_TRUNC);
   off_t written = 0;
@@ -798,6 +1417,7 @@ static void monitor(pid_t init, int master) {
     clock_gettime(CLOCK_MONOTONIC, &now);
     if (!exited && !killed && now.tv_sec >= next_check) {
       next_check = now.tv_sec + 2;
+      net_reconcile();
       const char *gone = sentinel_gone();
       if (gone) {
         killed = 1;
@@ -808,7 +1428,14 @@ static void monitor(pid_t init, int master) {
         write_file(path, "1");
       }
     }
-    if (!exited && waitpid(init, &status, WNOHANG) == init) {
+    siginfo_t info = {0};
+    if (!exited && waitid(P_PID, init, &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid == init) {
+      // Lock before reaping: a zombie init still counts as running, so no
+      // start or run gets in before the teardown below is done.
+      int lock = open_state("lock", O_RDWR | O_CREAT);
+      if (lock < 0 || flock(lock, LOCK_EX) < 0)
+        say("cannot lock %s: %s", opt.state, strerror(errno));
+      waitpid(init, &status, 0);
       if (WIFEXITED(status))
         say("container init exited with %d", WEXITSTATUS(status));
       else
@@ -838,6 +1465,7 @@ static void monitor(pid_t init, int master) {
     if (master < 0 || pfd.revents)
       usleep(500000);
   }
+  net_cleanup();
   char dir[4096], path[4096];
   cg_dir(dir, sizeof(dir), NULL);
   cg_remove(dir);
@@ -851,6 +1479,10 @@ static void monitor(pid_t init, int master) {
   snprintf(pid, sizeof(pid), "%d", getpid());
   write_file("/sys/fs/cgroup/cgroup.procs", pid);
   cg_tidy();
+  // Unmount the storage (it lives under the rootfs bind) before the lock goes
+  // at exit: the next start checks and mounts the same image.
+  if (umount2(opt.rootfs, MNT_DETACH) < 0)
+    say("unmount %s: %s", opt.rootfs, strerror(errno));
 }
 
 static int cmd_start(void) {
@@ -872,6 +1504,7 @@ static int cmd_start(void) {
     printf("running %d\n", running);
     return 0;
   }
+  opt.net = 1;
   ksu_guard();
 
   int ready[2];
@@ -963,8 +1596,10 @@ static pid_t spawn(int *console_sock) {
   struct child_pipes cp = {.go = go[0], .go_writer = go[1], .booted = booted[1], .console = console[1]};
   size_t stack_size = 1 << 20;
   char *stack = malloc(stack_size);
-  pid_t init_pid = clone(container_main, stack + stack_size,
-                         CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC | SIGCHLD, &cp);
+  int clone_flags = CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWIPC | SIGCHLD;
+  if (opt.net)
+    clone_flags |= CLONE_NEWNET;
+  pid_t init_pid = clone(container_main, stack + stack_size, clone_flags, &cp);
   if (init_pid < 0)
     die("clone: %s", strerror(errno));
   close(go[0]);
@@ -982,6 +1617,8 @@ static pid_t spawn(int *console_sock) {
   char path[64];
   snprintf(path, sizeof(path), "/proc/%d/oom_score_adj", init_pid);
   write_file(path, "0");
+  if (opt.net && net_setup(init_pid) < 0)
+    say("[net] host side failed; the container has no network");
   write(go[1], "g", 1);
   close(go[1]);
 
@@ -1069,22 +1706,46 @@ static int cmd_exec(void) {
     say("join %s: %s", dir, strerror(errno));
   ksu_guard();
 
+  // The app keeps talking to 127.0.0.1:<port>; the relay listens here in the
+  // host netns and joins the container netns per connection.
+  pid_t relay = -1;
+  if (opt.forward) {
+    char nsp[64];
+    snprintf(nsp, sizeof(nsp), "/proc/%d/ns/net", (int)init);
+    int netns = open(nsp, O_RDONLY | O_CLOEXEC);
+    if (netns < 0)
+      die("relay: open %s: %s", nsp, strerror(errno));
+    int lfd = relay_listen(opt.forward);
+    if (lfd < 0)
+      die("relay: cannot listen on 127.0.0.1:%d: %s", opt.forward, strerror(errno));
+    relay = fork();
+    if (relay < 0)
+      die("relay: fork: %s", strerror(errno));
+    if (relay == 0) {
+      prctl(PR_SET_PDEATHSIG, SIGTERM);
+      relay_serve(lfd, opt.forward, netns);
+      _exit(0);
+    }
+    close(lfd);
+    close(netns);
+  }
+
   // The groups the container's processes have: its init's, set at start.
   gid_t groups[32];
   int ngroups = init_groups(init, groups, 32);
   if (ngroups < 0 || setgroups(ngroups, groups) < 0)
     die("supplementary groups of %d: %s", init, strerror(errno));
 
-  const char *kinds[] = {"user", "mnt", "pid", "uts", "ipc", "cgroup"};
-  int fds[6];
-  for (int i = 0; i < 6; i++) {
+  const char *kinds[] = {"user", "net", "mnt", "pid", "uts", "ipc", "cgroup"};
+  int fds[7];
+  for (int i = 0; i < 7; i++) {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/ns/%s", init, kinds[i]);
     if ((fds[i] = open(path, O_RDONLY | O_CLOEXEC)) < 0)
       die("open %s: %s", path, strerror(errno));
   }
   // User first: the others belong to it, and we hold its capabilities after.
-  for (int i = 0; i < 6; i++)
+  for (int i = 0; i < 7; i++)
     if (setns(fds[i], 0) < 0)
       die("enter %s namespace: %s", kinds[i], strerror(errno));
   if (setresgid(0, 0, 0) < 0 || setresuid(0, 0, 0) < 0)
@@ -1123,8 +1784,11 @@ static int cmd_exec(void) {
   for (;;) {
     int status;
     pid_t done = waitpid(child, &status, WNOHANG);
-    if (done == child)
+    if (done == child) {
+      if (relay > 0)
+        kill(relay, SIGTERM);
       return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+    }
     if (!stopping) {
       struct pollfd pfd = {.fd = 0, .events = POLLIN};
       int closed = got_signal != 0;
@@ -1148,16 +1812,28 @@ static int cmd_exec(void) {
 
 // stop / status -------------------------------------------------------------
 
+// Once init is reaped, the lock is the monitor's until it has torn down and
+// exited (see monitor).
+static void teardown_wait(void) {
+  int lock = open_state("lock", O_RDWR | O_CREAT);
+  for (int i = 0; lock >= 0 && i < TEARDOWN_WAIT_S * 10 && flock(lock, LOCK_EX | LOCK_NB) < 0; i++)
+    usleep(100000);
+  if (lock >= 0)
+    close(lock);
+}
+
 static int cmd_stop(void) {
   pid_t init = running_init();
   if (!init) {
+    teardown_wait();
     printf("stopped\n");
     return 0;
   }
   kill(init, SYSTEMD_HALT);
-  // Until the monitor has reaped init and removed its cgroup and init.pid.
+  // Until the monitor has reaped init, then until it has torn down.
   for (int i = 0; i < opt.timeout * 10; i++) {
     if (!running_init()) {
+      teardown_wait();
       printf("stopped\n");
       return 0;
     }
@@ -1171,6 +1847,7 @@ static int cmd_stop(void) {
   kill(init, SIGKILL);
   for (int i = 0; i < 50 && running_init(); i++)
     usleep(100000);
+  teardown_wait();
   printf("stopped\n");
   return 0;
 }
@@ -1204,13 +1881,20 @@ static int cmd_grow(void) {
     if (loop < 0 || ioctl(loop, LOOP_SET_CAPACITY, 0) < 0)
       die("loop %s: %s; it grows at the next start", dev, strerror(errno));
     close(loop);
-    // The mount is in the container's namespace: reach it through init's root.
-    snprintf(path, sizeof(path), "/proc/%d/root/" STORAGE_DIR, init);
-    int mnt = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    // The mount is in the container's namespace: reach it through init's root,
+    // resolved inside that root only.
+    snprintf(path, sizeof(path), "/proc/%d/root", init);
+    int root = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    int at = root < 0 ? -1 : open_in(root, STORAGE_DIR);
+    char where[64];
+    fd_path(where, sizeof(where), at);
+    int mnt = at < 0 ? -1 : open(where, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     unsigned long long blocks = opt.storage_size / STORAGE_BLOCK;
     if (mnt < 0 || ioctl(mnt, EXT4_IOC_RESIZE_FS, &blocks) < 0)
-      die("resize %s: %s; it grows at the next start", path, strerror(errno));
+      die("resize %s: %s; it grows at the next start", STORAGE_DIR, strerror(errno));
     close(mnt);
+    close(at);
+    close(root);
   }
   printf("size %llu\n", opt.storage_size);
   return 0;
@@ -1283,6 +1967,10 @@ int main(int argc, char **argv) {
       opt.argv = argv + i + 1;
       break;
     }
+    if (!strcmp(a, "--net")) {
+      opt.net = 1;
+      continue;
+    }
     if (!v)
       die("%s needs a value", a);
     i++;
@@ -1311,6 +1999,12 @@ int main(int argc, char **argv) {
       opt.storage_size = number(v, "storage size");
     else if (!strcmp(a, "--timeout"))
       opt.timeout = number(v, "timeout");
+    else if (!strcmp(a, "--forward")) {
+      unsigned long f = number(v, "forward port");
+      if (!f || f > 65535)
+        die("bad forward port: %s", v);
+      opt.forward = (int)f;
+    }
     else if (!strcmp(a, "--range")) {
       char buf[64];
       snprintf(buf, sizeof(buf), "%s", v);

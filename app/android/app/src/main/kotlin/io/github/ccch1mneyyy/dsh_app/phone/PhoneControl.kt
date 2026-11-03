@@ -259,17 +259,16 @@ class PhoneControl private constructor(private val app: Context) : PhoneEnv, Con
     private fun checkReached() {
         if (!bridge.listening || bridge.authenticatedConnections > 0) return
         val ep = bridge.endpoint ?: return
-        if (ep.tcpPort != null) {
-            logger("[dsh-app] phone control: DSH did not connect to the phone bridge (unix socket nor loopback)")
-            return
-        }
-        logger("[dsh-app] phone control: DSH did not reach the unix socket; adding the loopback fallback")
+        if (ep.tcpPort == null)
+            logger("[dsh-app] phone control: DSH did not reach the unix socket; adding the TCP fallback")
         try {
             val next = bridge.addTcp() ?: return
-            rootfs?.let { PhoneGuest.writeConfig(it, next) }
-            prefs.edit().putBoolean(K_TCP_FALLBACK, true).apply()
+            if (next.tcpPort != null && ep.tcpPort == null)
+                rootfs?.let { PhoneGuest.writeConfig(it, next) }
+            if (next.tcpPort != null)
+                prefs.edit().putBoolean(K_TCP_FALLBACK, true).apply()
         } catch (e: Exception) {
-            logger("[dsh-app] phone control: loopback fallback failed: ${e.message}")
+            logger("[dsh-app] phone control: TCP fallback failed: ${e.message}")
         }
         emitStatus()
     }

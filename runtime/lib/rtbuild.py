@@ -1369,12 +1369,32 @@ def system_overlay_entries(info):
       "# dsh-app: PyPI mirror for users in China (change or delete to use pypi.org).\n"
       "[global]\nindex-url = https://pypi.tuna.tsinghua.edu.cn/simple\n"
       "disable-pip-version-check = true\n")
-    # Podman (if the user installs it): the kernel may have no pids controller (crun then
-    # refuses any pids limit), and a bridge cannot be made in the host network the
-    # container shares, so containers default to the host network.
+    # The kernel has no nf_tables, and iptables installs on its nft backend: after each apt
+    # run, switch to legacy, and start Docker again if it failed on nft in that same run.
+    # (dshns does the switch at boot too; this covers the boot in which Docker is installed.)
+    f("usr/lib/dsh-go/iptables-legacy",
+      "#!/bin/sh\n"
+      "# dsh-app: keep iptables on the legacy backend (this kernel has no nf_tables).\n"
+      "switched=\n"
+      "for t in iptables ip6tables; do\n"
+      "  [ -x /usr/sbin/$t-legacy ] || continue\n"
+      "  case \"$(readlink /etc/alternatives/$t)\" in\n"
+      "    *nft*) update-alternatives --quiet --set $t /usr/sbin/$t-legacy && switched=1 ;;\n"
+      "  esac\n"
+      "done\n"
+      "if [ -n \"$switched\" ] && systemctl -q is-enabled docker.service 2>/dev/null; then\n"
+      "  systemctl reset-failed docker.service docker.socket 2>/dev/null\n"
+      "  systemctl restart docker.service\n"
+      "fi\n"
+      "exit 0\n", 0o755)
+    f("etc/apt/apt.conf.d/50dsh-go-iptables",
+      "// dsh-app: keep iptables on the legacy backend (this kernel has no nf_tables).\n"
+      "DPkg::Post-Invoke { \"if [ -x /usr/lib/dsh-go/iptables-legacy ]; then /usr/lib/dsh-go/iptables-legacy; fi\"; };\n")
+    # Podman (if the user installs it): the kernel may have no pids controller, and crun
+    # then refuses any pids limit. Its default bridge works in the container's own netns.
     f("etc/containers/containers.conf.d/50-dsh-go.conf",
-      "# dsh-app: the system container shares the phone's network and may lack the pids cgroup.\n"
-      "[containers]\npids_limit = 0\nnetns = \"host\"\n")
+      "# dsh-app: the kernel may lack the pids cgroup.\n"
+      "[containers]\npids_limit = 0\n")
     f("var/lib/dsh-go/image.json", json.dumps(info, indent=2, sort_keys=True) + "\n")
     return E
 

@@ -36,12 +36,30 @@ class SystemContainerTest {
             "--rootfs", "/data/user/0/app/files/system/rootfs", "--uid", "10346", "--gid", "10346", "--range", "2100000000:1048575",
             "--storage", "/data/user/0/app/files/system/storage.img", "--storage-size", "${32L shl 30}",
             "--groups", "3003,9997"), args.take(20))
-        val binds = args.drop(20).chunked(2).onEach { assertEquals("--bind", it[0]) }.map { it[1] }
+        assertEquals("--net", args.last())
+        val binds = args.drop(20).dropLast(1).chunked(2).onEach { assertEquals("--bind", it[0]) }.map { it[1] }
         val r = prootRootfs.path
         assertEquals(listOf("$r/root:/root", "$r/opt/dsh:/opt/dsh", "$r/opt/node:/opt/node", "$r/opt/python:/opt/python",
             "$r/opt/dsh-go:/opt/dsh-go", "$r/opt/dsh-app:/opt/dsh-app", "$r/usr/local:/usr/local", "$r/etc/dsh-app:/etc/dsh-app",
             "$r/var/lib/dsh-app:/var/lib/dsh-app", "$r/etc:/run/dsh-go/proot-etc:ro",
             "/storage/emulated/0:/sdcard", "/storage:/storage"), binds)
+    }
+
+    @Test fun dockerTakeoverChangesOnlyTheSignatureNotTheLaunchersArguments() {
+        val args = SystemContainer.startArgs(layout, prootRootfs, emptyList(), 10346, 10346, emptyList())
+        assertEquals(listOf("--net"), args.takeLast(1))
+        assertFalse(args.any { it.contains("docker") })
+        assertNotEquals(SystemContainer.signature("r15", args), SystemContainer.signature("r15", args, dockerTakeover = true))
+        assertEquals(SystemContainer.signature("r15", args), SystemContainer.signature("r15", args, dockerTakeover = false))
+        // A new daemon.json in an app update restarts the container, so Docker reads it.
+        assertTrue(SystemContainer.signature("r15", args, dockerTakeover = true).contains("\"ip-forward-no-drop\": true"))
+    }
+
+    @Test fun execWithAForwardMapsTheAppLoopbackPort() {
+        val proot = listOf("/lib/libproot.so", "--rootfs=/r", "--cwd=/root/workspace") + guest
+        val command = SystemContainer.execCommand(layout, proot, 3080)
+        assertEquals(listOf("/data/app/x/lib/arm64/libdshns.so", "exec", "--name", "dsh", "--state", "/data/user/0/app/files/system/state",
+            "--cwd", "/root/workspace", "--forward", "3080", "--") + guest, shellWords(command[4]))
     }
 
     @Test fun startWithoutGroupsOrStorageLeavesThemOut() {

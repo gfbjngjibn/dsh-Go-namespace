@@ -201,12 +201,17 @@ object SystemContainer {
     private fun su(argv: List<String>) =
         listOf("/system/bin/su", "-W", "--ksu-no-new-privs", "-c", argv.joinToString(" ", transform = DirectLaunch::quote))
 
-    /** `dshns start`: [storage] holds PhoneStorage's binds (host[:guest]) when the app may reach the phone's files. */
+    /**
+     * `dshns start`: [storage] holds PhoneStorage's binds (host[:guest]) when the app may reach
+     * the phone's files. `--net` gives the container its own network namespace (and marks
+     * containers started before it had one, so that they restart).
+     */
     fun startArgs(layout: Layout, prootRootfs: File, storage: List<String>, uid: Int, gid: Int, groups: List<Int>): List<String> {
         val args = ArrayList(containerArgs(layout, "start", uid, gid, groups))
         for (path in SHARED) args += listOf("--bind", "${File(prootRootfs, path).path}:/$path")
         args += listOf("--bind", "${File(prootRootfs, "etc").path}:$PROOT_ETC:ro")
         for (bind in storage) args += listOf("--bind", "${bind.substringBefore(':')}:${bind.substringAfter(':', bind)}")
+        args += "--net"
         return args
     }
 
@@ -223,20 +228,27 @@ object SystemContainer {
         containerArgs(layout, "run", uid, gid, groups, storageSize) + listOf("--bind", "${File(prootRootfs, "root").path}:/root", "--",
             "/usr/bin/bash", "-c", script)
 
-    /** `dshns exec` of a proot argv's guest command, run as the container's root at its cwd. */
-    fun execCommand(layout: Layout, prootArgv: List<String>): List<String> {
+    /**
+     * `dshns exec` of a proot argv's guest command, run as the container's root at its cwd.
+     * [forwardPort] relays the host's 127.0.0.1:<port> to the same port inside the container;
+     * the engine keeps binding 127.0.0.1 (dsh web refuses a wildcard address), so the app keeps
+     * its loopback origin (a secure context).
+     */
+    fun execCommand(layout: Layout, prootArgv: List<String>, forwardPort: Int? = null): List<String> {
         val guest = guest(prootArgv)
-        return su(dshns(layout, "exec", "--cwd", guest.cwd, "--") + guest.argv)
+        val forward = if (forwardPort != null) listOf("--forward", "$forwardPort") else emptyList()
+        return su(dshns(layout, "exec", "--cwd", guest.cwd) + forward + listOf("--") + guest.argv)
     }
 
     /**
      * Starts the container unless it runs (blocking, seconds). One started with other binds,
      * or from another runtime, is shut down and started again: its mounts would still be the
-     * old ones. [runtime] is the runtime version the binds come from.
+     * old ones. [runtime] is the runtime version the binds come from; [dockerTakeover] whether
+     * the app owns Docker's daemon.json, which Docker reads only when the container boots.
      */
-    fun start(context: Context, args: List<String>, runtime: String, log: (String) -> Unit) {
+    fun start(context: Context, args: List<String>, runtime: String, dockerTakeover: Boolean = false, log: (String) -> Unit) {
         val layout = layout(context)
-        val signature = signature(runtime, args)
+        val signature = signature(runtime, args, dockerTakeover)
         if (running(context)) {
             val was = runCatching { layout.started.readText() }.getOrNull()
             if (was == signature) return
@@ -253,12 +265,86 @@ object SystemContainer {
         log("[dsh-app] system container ${out.lines.last { it.startsWith("running ") }}")
     }
 
+    /** The daemon.json the app writes when it takes Docker over. */
+    private val DOCKER_CONFIG = """
+        {
+          "bridge": "docker0",
+          "iptables": true,
+          "ip6tables": false,
+          "ip-forward-no-drop": true
+        }
+    """.trimIndent() + "\n"
+
+    /**
+     * rootfs/etc/docker/daemon.json, or null when etc/docker does not resolve to that very
+     * directory: the container owns what is in its rootfs, and a symlink there must not make
+     * the app write (or delete) one of its own files.
+     */
+    private fun dockerConfig(context: Context): java.nio.file.Path? {
+        val rootfs = layout(context).rootfs.canonicalFile
+        val dir = File(rootfs, "etc/docker")
+        if (!dir.isDirectory && !dir.mkdirs()) return null
+        if (dir.canonicalPath != dir.path) return null
+        val file = File(dir, "daemon.json").toPath()
+        return file.takeUnless { java.nio.file.Files.isSymbolicLink(it) }
+    }
+
+    /**
+     * The app takes Docker's daemon configuration over: a bridge Docker can create inside the
+     * container's netns, iptables on the legacy backend (the kernel has no nf_tables), no
+     * IPv6 table, and FORWARD's policy left at ACCEPT (Docker's DROP would also drop the
+     * phone's connections to ports Podman publishes). Called before the container starts; the
+     * daemon reads it at boot.
+     */
+    fun takeoverDocker(context: Context, log: (String) -> Unit): Boolean = try {
+        val file = dockerConfig(context) ?: error("etc/docker is not a plain directory of the rootfs")
+        if (java.nio.file.Files.isRegularFile(file) && String(java.nio.file.Files.readAllBytes(file)) == DOCKER_CONFIG) {
+            false
+        } else {
+            java.nio.file.Files.newByteChannel(file, setOf(java.nio.file.StandardOpenOption.WRITE,
+                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+                java.nio.file.LinkOption.NOFOLLOW_LINKS)).use { it.write(java.nio.ByteBuffer.wrap(DOCKER_CONFIG.toByteArray())) }
+            log("[dsh-app] Docker configuration taken over by the app")
+            true
+        }
+    } catch (error: Exception) {
+        log("[dsh-app] cannot write Docker configuration: ${error.message}")
+        false
+    }
+
+    /** Takeover turned off: removes the app's daemon.json, unless someone has edited it since. */
+    fun releaseDocker(context: Context, log: (String) -> Unit) {
+        runCatching {
+            val file = dockerConfig(context) ?: return
+            if (java.nio.file.Files.isRegularFile(file) && String(java.nio.file.Files.readAllBytes(file)) == DOCKER_CONFIG) {
+                java.nio.file.Files.delete(file)
+                log("[dsh-app] Docker configuration handed back (the app's daemon.json removed)")
+            }
+        }
+    }
+
+    /**
+     * 「局域网访问容器」: dshns lets anything routed to the container's subnet in while
+     * state/lan exists, and checks every two seconds, so a running container follows at once.
+     */
+    fun setLanAccess(context: Context, enabled: Boolean) {
+        val state = layout(context).state
+        val flag = File(state, "lan")
+        if (enabled) {
+            state.mkdirs()
+            flag.createNewFile()
+        } else {
+            flag.delete()
+        }
+    }
+
     /**
      * What a running container must have been started with to be kept: the runtime and the
-     * start arguments, but not the launcher's path. An app update moves the native libraries,
-     * and the container is no different for it.
+     * start arguments, but not the launcher's path (an app update moves the native libraries,
+     * and the container is no different for it), and the daemon.json the app owns, if any.
      */
-    fun signature(runtime: String, startArgs: List<String>): String = (listOf(runtime) + startArgs.drop(1)).joinToString("\n")
+    fun signature(runtime: String, startArgs: List<String>, dockerTakeover: Boolean = false): String =
+        (listOf(runtime) + startArgs.drop(1) + if (dockerTakeover) listOf("docker-takeover", DOCKER_CONFIG) else emptyList()).joinToString("\n")
 
     /** Asks systemd to shut down, which dshns cuts short after [STOP_TIMEOUT_S]; blocking. */
     fun stop(context: Context, log: (String) -> Unit): Boolean {

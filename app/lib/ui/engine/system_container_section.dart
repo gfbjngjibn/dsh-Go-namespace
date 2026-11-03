@@ -92,6 +92,21 @@ class _SystemContainerSectionState extends ConsumerState<SystemContainerSection>
     if (ok == true && mounted) await _run('restore', name: picked.name, done: l10n.phoneSystemRestoreDone);
   }
 
+  Future<void> _setDockerTakeover(bool value) => _setOption(() => ref.read(runtimeBridgeProvider).setDockerTakeover(value));
+
+  Future<void> _setLanAccess(bool value) => _setOption(() => ref.read(runtimeBridgeProvider).setLanAccess(value));
+
+  Future<void> _setOption(Future<void> Function() change) async {
+    setState(() => _working = true);
+    try {
+      await change();
+    } catch (_) {
+      if (mounted) showBriefNotice(context, context.l10n.phoneSystemActionFailed);
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
   Future<void> _delete() async {
     final l10n = context.l10n;
     final colors = DshColors.of(context);
@@ -170,6 +185,20 @@ class _SystemContainerSectionState extends ConsumerState<SystemContainerSection>
             subtitle: l10n.phoneSystemGrowHint,
             chevron: false,
             onTap: busy ? null : () => _run('grow'),
+          ),
+        if (installed)
+          SettingsSwitchTile(
+            title: l10n.phoneSystemDockerTakeover,
+            subtitle: l10n.phoneSystemDockerHint,
+            value: status.dockerTakeover,
+            onChanged: busy ? null : _setDockerTakeover,
+          ),
+        if (installed)
+          SettingsSwitchTile(
+            title: l10n.phoneSystemLanAccess,
+            subtitle: l10n.phoneSystemLanAccessHint,
+            value: status.lanAccess,
+            onChanged: busy ? null : _setLanAccess,
           ),
         if (installed)
           SettingsTile(

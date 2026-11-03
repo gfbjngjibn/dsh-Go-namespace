@@ -10327,7 +10327,7 @@ class L10nEn extends L10n {
 
   @override
   String get phoneSystemHint =>
-      'Experimental, off by default, applies from the next start and takes priority over direct launch. Needs KernelSU 3.2.5 or SukiSU 4.2.0 or later, with root granted to DSH Go in the root manager. The engine runs in an Ubuntu system container with systemd as PID 1, so services such as databases can be managed with systemctl, and Docker and Podman keep their data in a storage of their own. The container shares the phone\'s network, and root inside it cannot get root on the phone. It is a separate system from compatible launch: /root and DSH itself are shared, software installed with apt is not. The container keeps running when the app is closed or updated. The first start unpacks a system image of about 680 MB. If the launch fails, direct or compatible launch is used instead.';
+      'Experimental, off by default, applies from the next start and takes priority over direct launch. Needs KernelSU 3.2.5 or SukiSU 4.2.0 or later, with root granted to DSH Go in the root manager. The engine runs in an Ubuntu system container with systemd as PID 1, so services such as databases can be managed with systemctl, and Docker and Podman keep their data in a storage of their own. The container has a network of its own (address 10.213.0.2, online through the phone), and root inside it cannot get root on the phone. It is a separate system from compatible launch: /root and DSH itself are shared, software installed with apt is not. The container keeps running when the app is closed or updated. The first start unpacks a system image of about 680 MB. If the launch fails, direct or compatible launch is used instead.';
 
   @override
   String get phoneSystemFailedHint =>
@@ -10485,6 +10485,20 @@ class L10nEn extends L10n {
   @override
   String get phoneSystemGrowHint =>
       'Raises the ceiling of Docker\'s and Podman\'s storage. It takes only what is written, and what is deleted goes back to the phone.';
+
+  @override
+  String get phoneSystemDockerTakeover => 'Take over Docker config';
+
+  @override
+  String get phoneSystemDockerHint =>
+      'The app writes a Docker network configuration for the system container (bridge + legacy iptables); it applies once the next engine start restarts the container. Turned off, the file is removed unless it was edited since.';
+
+  @override
+  String get phoneSystemLanAccess => 'LAN access to the container';
+
+  @override
+  String get phoneSystemLanAccessHint =>
+      'Devices on the same hotspot or LAN can reach the container\'s services directly (databases, web pages, ports published with docker -p). Most of them have no password, so turn this on only on networks you trust. A computer on the same Wi-Fi also needs a route to 10.213.0.0/16 via this phone. Phone control stays open to the container only. Applies at once.';
 
   @override
   String get phoneSystemBackup => 'Back up system container';

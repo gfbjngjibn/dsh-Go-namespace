@@ -9808,7 +9808,7 @@ class L10nZh extends L10n {
 
   @override
   String get phoneSystemHint =>
-      '实验功能，默认关闭，下次启动生效，开启后优先于直接启动。需要 KernelSU 3.2.5 或 SukiSU 4.2.0 以上，并在 root 管理器里给 DSH Go 授予 root。引擎运行在以 systemd 为 1 号进程的 Ubuntu 系统容器里，数据库等服务可以用 systemctl 管理，Docker 和 Podman 的数据放在单独的存储里；容器和手机共用网络，容器里的 root 不能提权到整机。它和兼容启动是两套系统：/root 和 DSH 本身共用，apt 装的软件不共用。App 关闭或更新时容器继续运行。第一次启动会解压约 680 MB 的系统镜像。启动失败时自动改用直接启动或兼容启动。';
+      '实验功能，默认关闭，下次启动生效，开启后优先于直接启动。需要 KernelSU 3.2.5 或 SukiSU 4.2.0 以上，并在 root 管理器里给 DSH Go 授予 root。引擎运行在以 systemd 为 1 号进程的 Ubuntu 系统容器里，数据库等服务可以用 systemctl 管理，Docker 和 Podman 的数据放在单独的存储里；容器有自己的网络（地址 10.213.0.2，经手机上网），容器里的 root 不能提权到整机。它和兼容启动是两套系统：/root 和 DSH 本身共用，apt 装的软件不共用。App 关闭或更新时容器继续运行。第一次启动会解压约 680 MB 的系统镜像。启动失败时自动改用直接启动或兼容启动。';
 
   @override
   String get phoneSystemFailedHint => '这台手机上系统容器启动没有成功，已改用直接启动或兼容启动。停止引擎后打开可再试一次。';
@@ -9956,6 +9956,20 @@ class L10nZh extends L10n {
 
   @override
   String get phoneSystemGrowHint => '提高 Docker 和 Podman 存储的上限。只占实际写入的空间，删掉的会还给手机。';
+
+  @override
+  String get phoneSystemDockerTakeover => '接管 Docker 配置';
+
+  @override
+  String get phoneSystemDockerHint =>
+      '由 App 写入适合系统容器的 Docker 网络配置（bridge + legacy iptables），下次启动引擎时重启容器后生效。关掉时，这份配置如果没被改过就删除，改过的保留。';
+
+  @override
+  String get phoneSystemLanAccess => '局域网访问容器';
+
+  @override
+  String get phoneSystemLanAccessHint =>
+      '打开后，同一热点或局域网里的设备可以直接访问容器里的服务（数据库、网页、docker -p 发布的端口）。这些服务大多没有密码保护，只在你信任的网络里打开。同一 Wi-Fi 下的电脑还要加一条经本机到 10.213.0.0/16 的路由。手机操控始终只对容器开放。立即生效。';
 
   @override
   String get phoneSystemBackup => '备份系统容器';

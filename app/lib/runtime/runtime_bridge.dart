@@ -173,6 +173,8 @@ class RuntimeStatus {
     this.systemImageInstalled,
     this.systemContainerRunning = false,
     this.systemContainerBusy = false,
+    this.dockerTakeover = true,
+    this.lanAccess = false,
     this.systemStorage,
     this.systemBackups,
     this.currentExecutionMode,
@@ -246,6 +248,12 @@ class RuntimeStatus {
   final bool systemContainerRunning;
   final bool systemContainerBusy;
 
+  /// The app owns the container's Docker configuration (daemon.json).
+  final bool dockerTakeover;
+
+  /// 「局域网访问容器」: traffic routed to the container's subnet may reach its services.
+  final bool lanAccess;
+
   /// The Docker/Podman storage image: its ceiling and what it takes on the phone (null before the first start).
   final SystemStorage? systemStorage;
 
@@ -276,6 +284,8 @@ class RuntimeStatus {
     'systemImageInstalled': systemImageInstalled,
     'systemContainerRunning': systemContainerRunning,
     'systemContainerBusy': systemContainerBusy,
+    'dockerTakeover': dockerTakeover,
+    'lanAccess': lanAccess,
     'systemStorage': systemStorage == null ? null : {'ceiling': systemStorage!.ceiling, 'used': systemStorage!.used},
     'systemBackups': systemBackups == null
         ? null
@@ -339,6 +349,8 @@ class RuntimeStatus {
     systemImageInstalled: map['systemImageInstalled'] as String?,
     systemContainerRunning: map['systemContainerRunning'] == true,
     systemContainerBusy: map['systemContainerBusy'] == true,
+    dockerTakeover: map['dockerTakeover'] == true,
+    lanAccess: map['lanAccess'] == true,
     systemStorage: switch (map['systemStorage']) {
       final Map<Object?, Object?> m => SystemStorage(
         ceiling: (m['ceiling'] as num?)?.toInt() ?? 0,
@@ -719,6 +731,12 @@ class RuntimeBridge {
 
   /// The engine in the system container; like Direct, only while the engine is stopped.
   Future<void> setSystemEngine(bool enabled) => _methods.invokeMethod<void>('setSystemEngine', {'enabled': enabled});
+
+  /// The app owns the container's Docker daemon.json; applies on the next container start.
+  Future<void> setDockerTakeover(bool enabled) => _methods.invokeMethod<void>('setDockerTakeover', {'enabled': enabled});
+
+  /// 「局域网访问容器」; a running container follows within two seconds.
+  Future<void> setLanAccess(bool enabled) => _methods.invokeMethod<void>('setLanAccess', {'enabled': enabled});
 
   /// `start`, `stop`, `delete`, `grow` (the storage's ceiling), `backup` or `restore` ([name]: a backup) the
   /// system container: seconds to minutes (a first start unpacks the image, a backup copies everything).

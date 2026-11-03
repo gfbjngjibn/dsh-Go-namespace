@@ -157,6 +157,8 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         "systemImage" to systemImage?.version,
         "systemImageInstalled" to SystemContainer.installedVersion(app),
         "systemContainerRunning" to SystemContainer.running(app),
+        "dockerTakeover" to dockerTakeover(),
+        "lanAccess" to lanAccess(),
         "systemContainerBusy" to systemBusy,
         "systemStorage" to SystemContainer.storageUse(app)?.let { (ceiling, used) -> mapOf("ceiling" to ceiling, "used" to used) },
         "systemBackups" to systemBackups(),
@@ -194,6 +196,33 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         runtime = runCatching { manifest.runtimeVersion }.getOrNull(),
     )
 
+    /**
+     * Whether the app owns the container's Docker configuration (daemon.json). Read before
+     * every container start; flipping it changes the start signature, so the next engine start
+     * restarts the container and Docker picks the new configuration up. On by default: without
+     * it Docker cannot use its default bridge in the container.
+     */
+    private fun dockerTakeover(): Boolean = prefs.getBoolean(K_DOCKER_TAKEOVER, true)
+
+    /** No engine-stop requirement: the value applies on the next container start. */
+    @Synchronized fun setDockerTakeover(enabled: Boolean) {
+        check(!resetting) { "the app is being reset" }
+        prefs.edit().putBoolean(K_DOCKER_TAKEOVER, enabled).apply()
+        emitStatus()
+    }
+
+    /** 「局域网访问容器」, off by default: routed traffic may only answer the container. */
+    private fun lanAccess(): Boolean = prefs.getBoolean(K_LAN_ACCESS, false)
+
+    /** Applies at once to a running container (dshns re-checks its flag every two seconds). */
+    @Synchronized fun setLanAccess(enabled: Boolean) {
+        check(!resetting) { "the app is being reset" }
+        prefs.edit().putBoolean(K_LAN_ACCESS, enabled).apply()
+        SystemContainer.setLanAccess(app, enabled)
+        log("[dsh-app] LAN access to the system container ${if (enabled) "on" else "off"}", "system")
+        emitStatus()
+    }
+
     /** The engine in the system container, off by default; like Direct, an explicit choice forgets an earlier failure. */
     @Synchronized fun setSystemEngine(enabled: Boolean) {
         check(process == null && phase !in setOf(Phase.STARTING, Phase.RUNNING, Phase.STOPPING, Phase.INSTALLING) && !resetting) { "stop the engine before changing its launch method" }
@@ -229,9 +258,14 @@ class RuntimeController private constructor(private val app: Context) : DshProce
                     }
                 }) { log(it, "system") }
             }
+            val takeover = dockerTakeover()
+            if (takeover) SystemContainer.takeoverDocker(app) { log(it, "system") }
+            else SystemContainer.releaseDocker(app) { log(it, "system") }
+            // The flag lives in the state dir, which deleting the container removes: the pref is the truth.
+            SystemContainer.setLanAccess(app, lanAccess())
             val args = SystemContainer.startArgs(SystemContainer.layout(app), installer.rootfs, storage, android.os.Process.myUid(), android.system.Os.getgid(),
                 SystemContainer.supplementaryGroups())
-            SystemContainer.start(app, args, manifest.runtimeVersion) { log(it, "system") }
+            SystemContainer.start(app, args, manifest.runtimeVersion, takeover) { log(it, "system") }
         } finally {
             systemBusy = false
             emitStatus()
@@ -1041,6 +1075,8 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         /** Runtime version Direct failed to launch with (see [SafePolicy.directLaunchFailed]). */
         private const val K_DIRECT_FAILED = "directEngineFailedRuntime"
         private const val K_SYSTEM_ENGINE = "systemEngine"
+        private const val K_DOCKER_TAKEOVER = "dockerTakeover"
+        private const val K_LAN_ACCESS = "systemLanAccess"
         /** Runtime version the system container launch failed with; the next method until it changes or the user retries. */
         private const val K_SYSTEM_FAILED = "systemEngineFailedRuntime"
         private const val MAIN_FAILURE_LOG = "failure-normal.log"

@@ -30,9 +30,13 @@ import kotlin.concurrent.thread
  * carrying this launch's token; then it is MCP over newline-delimited JSON-RPC, served by
  * [McpServer]. A per-launch random socket name keeps other apps from squatting it.
  *
- * Fallback: loopback TCP + token, opened only when asked (see [PhoneControl]); the
- * peer uid is checked through /proc/net/tcp when readable. Any app can reach loopback, so this
- * is weaker and used only on devices where the abstract socket turns out unreachable.
+ * Fallback: TCP + token, opened only when asked (see [PhoneControl]); the peer uid is checked
+ * through /proc/net/tcp when readable. It listens on loopback and, when the system container's
+ * bridge exists, on the bridge gateway: abstract unix sockets are scoped to a network namespace,
+ * so the container's guest relay cannot reach this app's abstract socket and joins over the
+ * bridge instead, and only from the container's subnet (dshns also drops anything else sent
+ * to the gateway). Any app can reach loopback, so the fallback is weaker and used only when
+ * the abstract socket turns out unreachable.
  *
  * Same-uid code (anything in the rootfs) gets past both checks by design: the real gate is the
  * person's tap on the confirmation.
@@ -44,6 +48,7 @@ class PhoneBridge(
     @Volatile private var running = false
     private var local: LocalServerSocket? = null
     private var tcp: ServerSocket? = null
+    private var tcpBridge: ServerSocket? = null
     private val open = Collections.synchronizedSet(HashSet<Closeable>())
     private val calls = Executors.newCachedThreadPool { r -> Thread(r, "dsh-phone-call").apply { isDaemon = true } }
     private val slots = Semaphore(MAX_CONNECTIONS)
@@ -77,6 +82,7 @@ class PhoneBridge(
         var port: Int? = null
         if (withTcp || name == null) {
             tcp = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1")).also { port = it.localPort }
+            tcpBridge = bindBridge(port!!)
         }
         running = true
         authed.set(0)
@@ -84,7 +90,9 @@ class PhoneBridge(
         endpoint = ep
         local?.let { s -> thread(name = "dsh-phone-accept", isDaemon = true) { acceptLocal(s, token) } }
         tcp?.let { s -> thread(name = "dsh-phone-accept-tcp", isDaemon = true) { acceptTcp(s, token) } }
-        log("[dsh-app] phone bridge listening" + (name?.let { " on @$it" } ?: "") + (port?.let { " and 127.0.0.1:$it" } ?: ""))
+        tcpBridge?.let { s -> thread(name = "dsh-phone-accept-tcp-bridge", isDaemon = true) { acceptTcp(s, token, containerOnly = true) } }
+        log("[dsh-app] phone bridge listening" + (name?.let { " on @$it" } ?: "") + (port?.let { " and 127.0.0.1:$it" } ?: "") +
+            (tcpBridge?.let { " and $BRIDGE_HOST:$port" } ?: ""))
         return ep
     }
 
@@ -93,13 +101,26 @@ class PhoneBridge(
     fun addTcp(): PhoneGuest.Endpoint? {
         val ep = endpoint ?: return null
         if (!running) return null
-        if (ep.tcpPort != null) return ep
+        if (ep.tcpPort != null) {
+            // The container may have come up after start(): bind the bridge gateway now.
+            if (tcpBridge == null) {
+                tcpBridge = bindBridge(ep.tcpPort)
+                tcpBridge?.let { b ->
+                    thread(name = "dsh-phone-accept-tcp-bridge", isDaemon = true) { acceptTcp(b, ep.token, containerOnly = true) }
+                    log("[dsh-app] phone bridge: added $BRIDGE_HOST:${ep.tcpPort}")
+                }
+            }
+            return ep
+        }
         val s = ServerSocket(0, 8, InetAddress.getByName("127.0.0.1"))
         tcp = s
+        tcpBridge = bindBridge(s.localPort)
         val next = ep.copy(tcpPort = s.localPort)
         endpoint = next
         thread(name = "dsh-phone-accept-tcp", isDaemon = true) { acceptTcp(s, ep.token) }
-        log("[dsh-app] phone bridge: added loopback fallback on 127.0.0.1:${s.localPort}")
+        tcpBridge?.let { b -> thread(name = "dsh-phone-accept-tcp-bridge", isDaemon = true) { acceptTcp(b, ep.token, containerOnly = true) } }
+        log("[dsh-app] phone bridge: added TCP fallback on 127.0.0.1:${s.localPort}" +
+            (tcpBridge?.let { " and $BRIDGE_HOST:${s.localPort}" } ?: ""))
         return next
     }
 
@@ -116,6 +137,8 @@ class PhoneBridge(
         local = null
         tcp?.let { runCatching { it.close() } }
         tcp = null
+        tcpBridge?.let { runCatching { it.close() } }
+        tcpBridge = null
         synchronized(open) {
             open.forEach { runCatching { it.close() } }
             open.clear()
@@ -148,7 +171,8 @@ class PhoneBridge(
         }
     }
 
-    private fun acceptTcp(s: ServerSocket, token: String) {
+    /** [containerOnly]: the bridge gateway's socket, which serves the system container's subnet only. */
+    private fun acceptTcp(s: ServerSocket, token: String, containerOnly: Boolean = false) {
         while (running) {
             val sock: Socket = try {
                 s.accept()
@@ -159,6 +183,11 @@ class PhoneBridge(
             if (!running) {
                 runCatching { sock.close() }
                 return
+            }
+            if (containerOnly && !fromContainer(sock.inetAddress)) {
+                log("[dsh-app] phone bridge: refused a connection from ${sock.inetAddress.hostAddress} (not the system container)")
+                runCatching { sock.close() }
+                continue
             }
             val uid = loopbackPeerUid(sock.port, s.localPort)
             if (uid != null && uid != Process.myUid()) {
@@ -249,6 +278,21 @@ class PhoneBridge(
                 if (buf.size() >= max) throw java.io.IOException("line too long")
                 buf.write(b)
             }
+        }
+
+        /** The system container's bridge gateway; binding it fails when that container is off. */
+        const val BRIDGE_HOST = "10.213.0.1"
+
+        /** A peer in the system container's subnet (10.213.0.0/16). TCP cannot fake its source and still connect. */
+        fun fromContainer(address: InetAddress?): Boolean {
+            val bytes = (address as? java.net.Inet4Address)?.address ?: return false
+            return bytes[0] == 10.toByte() && bytes[1] == 213.toByte()
+        }
+
+        private fun bindBridge(port: Int): ServerSocket? = try {
+            ServerSocket(port, 8, InetAddress.getByName(BRIDGE_HOST))
+        } catch (_: Exception) {
+            null
         }
 
         /** The uid owning the client end of a loopback connection, from /proc/net/tcp{,6}; null if unknown. */

@@ -170,7 +170,9 @@ class DshProcess(
             env.clear()
             env.putAll(plan.environment)
         } else if (system) {
-            builder.command(SystemContainer.execCommand(SystemContainer.layout(context), argv))
+            // dsh web refuses a wildcard bind address, so it keeps binding 127.0.0.1 inside the
+            // container netns; dshns exec --forward relays the app's 127.0.0.1:<port> to it.
+            builder.command(SystemContainer.execCommand(SystemContainer.layout(context), argv, port))
             env.clear()
             env["PATH"] = "/system/bin:/system/xbin"
         }
