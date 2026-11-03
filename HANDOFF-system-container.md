@@ -1,6 +1,6 @@
 # 交接：dsh-Go 本地引擎换容器（自用改造）
 
-> 2026-11-03 交接，同日第二、第三、第四个会话更新（第三个会话删掉了命名空间启动，加了 Docker/Podman 存储、备份恢复、卸载保护；第四个会话加了独立网络命名空间、Docker 默认网桥接管、宿主 loopback 中继和系统容器里的手机操控，见 §5b、§5c、§6b、§6c）。第五个会话审查并修正了第四个会话的改动，又按 App 里 agent 的自检结果改了提示词、Podman 默认网络、Docker 配置，修了容器重启的竞态（§5d、§5e、§6d、§6e）。前三个会话的改动是 `system-container` 上的 `09e4691`，第四、五个会话的改动是 `6e688aa`（已推送到 fork）；之后修的中继泄漏（§5e 末条）**未提交**，本仓库不接受外部 PR，这是用户自用的改造。
+> 2026-11-03 交接，同日第二、第三、第四个会话更新（第三个会话删掉了命名空间启动，加了 Docker/Podman 存储、备份恢复、卸载保护；第四个会话加了独立网络命名空间、Docker 默认网桥接管、宿主 loopback 中继和系统容器里的手机操控，见 §5b、§5c、§6b、§6c）。第五个会话审查并修正了第四个会话的改动，又按 App 里 agent 的自检结果改了提示词、Podman 默认网络、Docker 配置，修了容器重启的竞态（§5d、§5e、§6d、§6e）。前三个会话的改动是 `system-container` 上的 `09e4691`，第四、五个会话的改动是 `6e688aa`，之后修的中继泄漏（§5e）是 `1eaa590`，都已推送到 fork，本仓库不接受外部 PR，这是用户自用的改造。
 > 新会话先读本文，再读 `CLAUDE.md`。
 
 ## 1. 用户已经拍板的决定
@@ -36,7 +36,7 @@
   kill $H; rm -f $F
   ```
   不要用 `</dev/null`（命令会立刻被结束，退出码 143），也不要在 `su -c` 里套多层引号。
-- Git：这是用户自用的分叉，推到用户自己的 fork（公开）：远端 `fork` = https://github.com/gfbjngjibn/dsh-Go-namespace ，分支 `system-container`；`origin` 是上游，**绝不推送**。本仓库的 git 配置（只在本仓库）：`user.name gfbjngjibn`，`user.email 74477599+gfbjngjibn@users.noreply.github.com`（**不要用用户的真实邮箱**），`credential.helper` 是 Windows 的 Git Credential Manager。推送要在 Bash 沙箱外执行。只在用户要求时提交、推送；只暂存明确路径。第三个会话的全部工作是 `system-container` 上的一个提交 `09e4691`，第四、五个会话的是 `6e688aa`（2026-11-03 已推送）。
+- Git：这是用户自用的分叉，推到用户自己的 fork（公开）：远端 `fork` = https://github.com/gfbjngjibn/dsh-Go-namespace ，分支 `system-container`；`origin` 是上游，**绝不推送**。本仓库的 git 配置（只在本仓库）：`user.name gfbjngjibn`，`user.email 74477599+gfbjngjibn@users.noreply.github.com`（**不要用用户的真实邮箱**），`credential.helper` 是 Windows 的 Git Credential Manager。推送要在 Bash 沙箱外执行。只在用户要求时提交、推送；只暂存明确路径。第三个会话的全部工作是 `system-container` 上的一个提交 `09e4691`，第四、五个会话的是 `6e688aa` 和 `1eaa590`（中继泄漏），2026-11-03 都已推送。
   - 第一次推送时带了用户的真实邮箱（提交 `30425e7`），已改成 noreply 并 force-push，但 GitHub 仍能按 SHA 查到这个旧提交。**用户决定不处理（2026-11-03："那个邮箱的事情不用管了"），不要再提起，也不要建议联系 GitHub Support 或删 fork**；新提交照样只用 noreply 邮箱。
 - 界面自动化：`uiautomator dump` 能拿到 Flutter 的语义节点（文字和坐标），比截图可靠；本会话的脚本在会话 scratchpad 里，没进仓库，需要时照着重写（dump → 按文字找 bounds → `input tap` 中心点）。
 - 测试：
@@ -257,7 +257,7 @@
 - **「接管 Docker 配置」改为默认打开**（用户决定）：`RuntimeController.dockerTakeover()` 的默认值、Dart `RuntimeStatus` 的占位默认值都改成 true。关着时 Docker 用不了默认网桥。
 - **面向用户的文案**：FAQ（`docs/guide/{zh,en}/11-faq.md`）删掉"目前能跑容器的是 Podman、Docker 跑不起容器"，改成两者都能跑、默认网桥可用、接管默认打开，另加一条网络说明（10.213.0.2、手机上怎么访问、局域网默认访问不到和「局域网访问容器」开关）；开关说明 `phoneSystemHint`（中英）的"容器和手机共用网络"改成"容器有自己的网络（地址 10.213.0.2，经手机上网）"。跑过 `l10n_merge.py` 和 `guide_sync.py`，`--check` 都通过。
 - APK 11032026（镜像 `s1-ubuntu-noble-20261018_1335-36684ad3a02b`）已装到平板；验证见 §6e。默认打开接管和上一条文案是之后改的，**没有重新打包上机**（平板上的接管偏好本来就开着）。
-- **中继泄漏**（推送 `6e688aa` 后发现，修复未提交）：`exec --forward` 的中继是在包装进程切进容器 userns 之前 fork 的，以宿主 root 运行；包装进程之后是容器 root（宿主 uid 10346），`kill(relay, SIGTERM)` 被拒（EPERM），内核发父进程死亡信号（`PR_SET_PDEATHSIG`）也按包装进程的身份检查权限，同样发不出去。于是每停一次引擎就留下一个监听宿主 `127.0.0.1:<旧端口>`、转发进容器同一端口的中继：App 的端口一路涨（3080→3081→3082），而且以后容器里谁占了那个端口，手机上任何 App 都能连进去。修法：包装进程留一根管道的写端（CLOEXEC，不给容器命令），中继 `poll` 监听套接字和读端，包装进程无论怎么退出，读端一 HUP 中继就退出；去掉无效的 `kill` 和 PDEATHSIG。
+- **中继泄漏**（推送 `6e688aa` 后发现，修复是 `1eaa590`）：`exec --forward` 的中继是在包装进程切进容器 userns 之前 fork 的，以宿主 root 运行；包装进程之后是容器 root（宿主 uid 10346），`kill(relay, SIGTERM)` 被拒（EPERM），内核发父进程死亡信号（`PR_SET_PDEATHSIG`）也按包装进程的身份检查权限，同样发不出去。于是每停一次引擎就留下一个监听宿主 `127.0.0.1:<旧端口>`、转发进容器同一端口的中继：App 的端口一路涨（3080→3081→3082），而且以后容器里谁占了那个端口，手机上任何 App 都能连进去。修法：包装进程留一根管道的写端（CLOEXEC，不给容器命令），中继 `poll` 监听套接字和读端，包装进程无论怎么退出，读端一 HUP 中继就退出；去掉无效的 `kill` 和 PDEATHSIG。
 - 检查：Kotlin 789 个通过；`flutter analyze` 无问题；`runtime/tests` 的 Python 测试通过，node 测试 238 个里 10 个失败，都是因为没设 `DSH_PREFIX`/`DSH_TEST_PREFIX`（需要打好补丁的 DSH 安装），与本次改动无关。
 
 ## 6. 真机验证结果（2026-11-03）
