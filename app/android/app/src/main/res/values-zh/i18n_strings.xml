@@ -266,6 +266,14 @@
     <string name="service_title">本地 DSH</string>
     <string name="service_stop_phone">停止操作</string>
     <string name="service_stop">停止</string>
+    <string name="service_quit">退出</string>
+    <!-- quit (runtime/QuitActivity.kt) -->
+    <string name="quit_title">退出 DSH Go（含容器）？</string>
+    <string name="quit_message">停止本机引擎，关闭系统容器（容器里的服务会一起停止），然后退出 App。</string>
+    <string name="quit_confirm">退出</string>
+    <string name="quit_cancel">取消</string>
+    <string name="quit_progress">正在停止引擎和系统容器…</string>
+    <string name="quit_container_failed">系统容器没有正常关闭</string>
     <string name="service_package_checksum_failed">运行时包校验失败（sha256 不匹配），请重新安装 App</string>
     <string name="service_storage_insufficient">存储空间不足：需要约 %1$s MB，当前可用 %2$s MB</string>
     <!-- share -->

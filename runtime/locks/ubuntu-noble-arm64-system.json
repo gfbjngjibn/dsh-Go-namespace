@@ -1,0 +1,107 @@
+{
+  "arch": "arm64",
+  "want": [
+    "git"
+  ],
+  "packages": [
+    {
+      "package": "git",
+      "version": "1:2.43.0-1ubuntu7.4",
+      "architecture": "arm64",
+      "filename": "pool/main/g/git/git_2.43.0-1ubuntu7.4_arm64.deb",
+      "sha256": "b46ef5ad7292f8ae69a7ec18c05e5b40f6c1fca837df2ce4b05b05bd46c9dc2b",
+      "size": 3773586,
+      "installedSize": 21796,
+      "upgradesBase": null,
+      "neededBy": "requested"
+    },
+    {
+      "package": "git-man",
+      "version": "1:2.43.0-1ubuntu7.4",
+      "architecture": "all",
+      "filename": "pool/main/g/git/git-man_2.43.0-1ubuntu7.4_all.deb",
+      "sha256": "77f57651734edc24b5a9e7863bc261bf302060ac3c12bbb08a459966ea4d30a6",
+      "size": 1100786,
+      "installedSize": 2163,
+      "upgradesBase": null,
+      "neededBy": "git"
+    },
+    {
+      "package": "libcurl3t64-gnutls",
+      "version": "8.5.0-2ubuntu10.16",
+      "architecture": "arm64",
+      "filename": "pool/main/c/curl/libcurl3t64-gnutls_8.5.0-2ubuntu10.16_arm64.deb",
+      "sha256": "057490ffc9901df7fe09913e381442fc7615bb972a1dc4198e38bcf840447e77",
+      "size": 331078,
+      "installedSize": 877,
+      "upgradesBase": null,
+      "neededBy": "git"
+    },
+    {
+      "package": "liberror-perl",
+      "version": "0.17029-2",
+      "architecture": "all",
+      "filename": "pool/main/libe/liberror-perl/liberror-perl_0.17029-2_all.deb",
+      "sha256": "1907af6bf33dd8684447c09f216c675d2b8559fadd8ddace29fbf83c6fb2a636",
+      "size": 25632,
+      "installedSize": 69,
+      "upgradesBase": null,
+      "neededBy": "git"
+    },
+    {
+      "package": "libgdbm-compat4t64",
+      "version": "1.23-5.1build1",
+      "architecture": "arm64",
+      "filename": "pool/main/g/gdbm/libgdbm-compat4t64_1.23-5.1build1_arm64.deb",
+      "sha256": "e5788a4d0477e0b5bf5cad8950cbd591698828836818c180c20da6f86d68bd37",
+      "size": 6578,
+      "installedSize": 86,
+      "upgradesBase": null,
+      "neededBy": "libperl5.38t64"
+    },
+    {
+      "package": "libgdbm6t64",
+      "version": "1.23-5.1build1",
+      "architecture": "arm64",
+      "filename": "pool/main/g/gdbm/libgdbm6t64_1.23-5.1build1_arm64.deb",
+      "sha256": "acc12af7e644ac336024c5d24028b20814fadd272588be30fb792982217e2dd4",
+      "size": 34352,
+      "installedSize": 88,
+      "upgradesBase": null,
+      "neededBy": "libperl5.38t64"
+    },
+    {
+      "package": "libperl5.38t64",
+      "version": "5.38.2-3.2ubuntu0.6",
+      "architecture": "arm64",
+      "filename": "pool/main/p/perl/libperl5.38t64_5.38.2-3.2ubuntu0.6_arm64.deb",
+      "sha256": "f9ef8a6909d0048cc4e4ce89c3c3ed010ba13e7932024d5744e38294e42b0925",
+      "size": 4784712,
+      "installedSize": 31048,
+      "upgradesBase": null,
+      "neededBy": "perl"
+    },
+    {
+      "package": "perl",
+      "version": "5.38.2-3.2ubuntu0.6",
+      "architecture": "arm64",
+      "filename": "pool/main/p/perl/perl_5.38.2-3.2ubuntu0.6_arm64.deb",
+      "sha256": "c8997d0e440f8f220981e25af1f63d1ab6a86afba770218a240cd5f385585aee",
+      "size": 231438,
+      "installedSize": 674,
+      "upgradesBase": null,
+      "neededBy": "git"
+    },
+    {
+      "package": "perl-modules-5.38",
+      "version": "5.38.2-3.2ubuntu0.6",
+      "architecture": "all",
+      "filename": "pool/main/p/perl/perl-modules-5.38_5.38.2-3.2ubuntu0.6_all.deb",
+      "sha256": "9c4c90145209d4f85be9255417008e8decb9cd5d189f446fd39ad096e31199cf",
+      "size": 3110182,
+      "installedSize": 19165,
+      "upgradesBase": null,
+      "neededBy": "perl"
+    }
+  ]
+}

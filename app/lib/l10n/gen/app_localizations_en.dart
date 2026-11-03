@@ -10255,6 +10255,279 @@ class L10nEn extends L10n {
   String get phoneDirectChangeFailed => 'Could not change the launch method. Stop the local engine and try again.';
 
   @override
+  String get phoneSystemCheckRoot => 'Root access';
+
+  @override
+  String get phoneSystemCheckMnt => 'Mount namespace';
+
+  @override
+  String get phoneSystemCheckPid => 'PID namespace';
+
+  @override
+  String get phoneSystemCheckIpc => 'IPC namespace';
+
+  @override
+  String get phoneSystemCheckUts => 'Hostname namespace';
+
+  @override
+  String get phoneSystemCheckUser => 'User namespace';
+
+  @override
+  String get phoneSystemCheckNoNewPrivs => 'Escalation guard';
+
+  @override
+  String get phoneSystemCheckTrial => 'Escalation trial';
+
+  @override
+  String get phoneSystemCheckRootOk => 'su works and DSH Go is granted root.';
+
+  @override
+  String get phoneSystemCheckKernelOk => 'Supported by the kernel.';
+
+  @override
+  String get phoneSystemCheckNoNewPrivsOk => 'The root manager supports --ksu-no-new-privs.';
+
+  @override
+  String get phoneSystemCheckTrialOk =>
+      'su is refused to DSH Go\'s own identity, so nothing in the container can get root on the phone.';
+
+  @override
+  String get phoneSystemCheckNotGranted => 'No su, or the root manager has not granted DSH Go root yet.';
+
+  @override
+  String get phoneSystemCheckNeedsRoot => 'Needs root access first.';
+
+  @override
+  String get phoneSystemCheckKernelMissing => 'This kernel feature is not enabled.';
+
+  @override
+  String get phoneSystemCheckNoNewPrivsMissing =>
+      'The root manager does not support it. Needs KernelSU 3.2.5 or SukiSU 4.2.0 or later.';
+
+  @override
+  String get phoneSystemCheckSkipped => 'Not tried, because the requirements above are not all met.';
+
+  @override
+  String get phoneSystemCheckEscalated => 'DSH Go\'s own identity can still get root on the phone through su.';
+
+  @override
+  String get phoneSystemCheckTimeout => 'The check timed out.';
+
+  @override
+  String get phoneSystemCheckPassed => 'All requirements are met.';
+
+  @override
+  String get phoneSystemCheckError => 'The check could not finish. Try again later.';
+
+  @override
+  String get phoneSystemEnable => 'Turn on';
+
+  @override
+  String get phoneSystemEngine => 'System container launch';
+
+  @override
+  String get phoneSystemHint =>
+      'Experimental, off by default, applies from the next start and takes priority over direct launch. Needs KernelSU 3.2.5 or SukiSU 4.2.0 or later, with root granted to DSH Go in the root manager. The engine runs in an Ubuntu system container with systemd as PID 1, so services such as databases can be managed with systemctl, and Docker and Podman keep their data in a storage of their own. The container shares the phone\'s network, and root inside it cannot get root on the phone. It is a separate system from compatible launch: /root and DSH itself are shared, software installed with apt is not. The container keeps running when the app is closed or updated. The first start unpacks a system image of about 680 MB. If the launch fails, direct or compatible launch is used instead.';
+
+  @override
+  String get phoneSystemFailedHint =>
+      'The system container launch did not work on this phone, so direct or compatible launch is used. Stop the engine and turn this on to try again.';
+
+  @override
+  String get phoneSystemCheck => 'Check system container requirements';
+
+  @override
+  String get phoneSystemCheckHint => 'Root, namespaces, escalation guard, cgroup2 and kernel options';
+
+  @override
+  String get phoneSystemCheckTitle => 'System container requirements';
+
+  @override
+  String get phoneSystemChecking => 'Checking…';
+
+  @override
+  String get phoneSystemCheckCgroupNs => 'Cgroup namespace';
+
+  @override
+  String get phoneSystemCheckCgroup2 => 'Cgroup2 delegation';
+
+  @override
+  String get phoneSystemCheckCgroup2Ok =>
+      'The container can get a cgroup of its own, and everything in it can be ended at once.';
+
+  @override
+  String get phoneSystemCheckCgroup2Missing => 'No usable cgroup2, or a kernel before 5.14 (no cgroup.kill).';
+
+  @override
+  String get phoneSystemCheckLauncher => 'Container launcher';
+
+  @override
+  String get phoneSystemCheckLauncherOk => 'dshns is installed with the app.';
+
+  @override
+  String get phoneSystemCheckLauncherMissing => 'This build has no dshns.';
+
+  @override
+  String get phoneSystemCheckImage => 'System image';
+
+  @override
+  String get phoneSystemCheckImageMissing => 'This build carries no system image.';
+
+  @override
+  String get phoneSystemCheckOptionOn => 'On.';
+
+  @override
+  String get phoneSystemCheckOptionOff => 'Off.';
+
+  @override
+  String get phoneSystemCheckOptionUnknown => 'The kernel configuration cannot be read.';
+
+  @override
+  String get phoneSystemCheckOffPids =>
+      'Off: the container\'s process count cannot be limited; normal use is unaffected.';
+
+  @override
+  String get phoneSystemCheckOffNftables =>
+      'Off: no nftables in the container; use iptables-legacy for firewall rules.';
+
+  @override
+  String get phoneSystemCheckOffBridgeNetfilter => 'Off: no traffic filtering on Docker\'s default bridge.';
+
+  @override
+  String get phoneSystemCheckOffAutofs => 'Off: no systemd automounts; the image masks those units.';
+
+  @override
+  String get phoneSystemCheckOffCheckpoint => 'Off: no CRIU checkpoint and restore.';
+
+  @override
+  String get phoneSystemCheckPassedWarn =>
+      'Can be turned on. The kernel options marked yellow are off, so what they provide is unavailable.';
+
+  @override
+  String get phoneSystemCheckFailed =>
+      'Some requirements are not met, so the system container launch cannot be turned on.';
+
+  @override
+  String get phoneLaunchSystem => 'System container';
+
+  @override
+  String get phoneSystemLaunchFailed => 'System container launch failed';
+
+  @override
+  String get phoneSystemContainer => 'System container';
+
+  @override
+  String get phoneSystemState => 'State';
+
+  @override
+  String get phoneSystemRunning => 'Running';
+
+  @override
+  String get phoneSystemBusy => 'Working…';
+
+  @override
+  String get phoneSystemNotInstalled => 'Not installed';
+
+  @override
+  String get phoneSystemImage => 'Image';
+
+  @override
+  String get phoneSystemStart => 'Start container';
+
+  @override
+  String get phoneSystemStartHint =>
+      'systemd starts the services in it; the container keeps running after the app closes.';
+
+  @override
+  String get phoneSystemStartInstallHint =>
+      'The first start unpacks the system image (about 680 MB), which takes a minute or two.';
+
+  @override
+  String get phoneSystemStop => 'Stop container';
+
+  @override
+  String get phoneSystemStopHint => 'Lets systemd shut down; whatever is left after a minute is ended.';
+
+  @override
+  String get phoneSystemStopEngineFirst => 'The engine runs in the container: stop the engine first.';
+
+  @override
+  String get phoneSystemDelete => 'Delete system container';
+
+  @override
+  String get phoneSystemDeleteHint =>
+      'Deletes the software and data installed in the container, Docker storage included; /root and DSH\'s data are kept.';
+
+  @override
+  String get phoneSystemDeleteTitle => 'Delete the system container?';
+
+  @override
+  String get phoneSystemDeleteBody =>
+      'Software installed with apt, databases, Docker and Podman images and data, and every other file in the container are deleted. Chats, workspaces and settings in /root are kept. The next container start unpacks the image again.';
+
+  @override
+  String get phoneSystemActionFailed => 'That did not finish; see the engine log.';
+
+  @override
+  String get phoneSystemStorage => 'Docker storage';
+
+  @override
+  String phoneSystemStorageValue(String used, String ceiling) {
+    return '$used used of $ceiling';
+  }
+
+  @override
+  String get phoneSystemStorageNone => 'Created at the first container start';
+
+  @override
+  String get phoneSystemGrow => 'Add 16 GB';
+
+  @override
+  String get phoneSystemGrowHint =>
+      'Raises the ceiling of Docker\'s and Podman\'s storage. It takes only what is written, and what is deleted goes back to the phone.';
+
+  @override
+  String get phoneSystemBackup => 'Back up system container';
+
+  @override
+  String get phoneSystemBackupHint =>
+      'Stops the container, then packs the system, Docker storage and /root into Download/DSH-Go/backups. The backup holds your chats and API settings: keep it safe.';
+
+  @override
+  String get phoneSystemBackupNeedsStorage => 'Backup and restore need Access phone files, turned on in Settings.';
+
+  @override
+  String get phoneSystemBackupDone => 'Backed up to Download/DSH-Go/backups';
+
+  @override
+  String get phoneSystemRestore => 'Restore from backup';
+
+  @override
+  String get phoneSystemRestoreHint => 'Replaces the system container with a backup';
+
+  @override
+  String get phoneSystemRestoreNone => 'There are no backups in Download/DSH-Go/backups yet.';
+
+  @override
+  String get phoneSystemRestoreTitle => 'Restore this backup?';
+
+  @override
+  String get phoneSystemRestoreBody =>
+      'The software, databases and Docker data in the system container are deleted and replaced by the backup\'s. Files in /root that the backup also has are overwritten.';
+
+  @override
+  String get phoneSystemRestoreConfirm => 'Restore';
+
+  @override
+  String get phoneSystemRestoreDone => 'Restored';
+
+  @override
+  String get phoneQuitAll => 'Quit DSH Go (with container)';
+
+  @override
+  String get phoneQuitAllHint => 'Stops the engine, shuts the system container down, then quits the app.';
+
+  @override
   String get phoneActualLaunchMode => 'Current launch';
 
   @override

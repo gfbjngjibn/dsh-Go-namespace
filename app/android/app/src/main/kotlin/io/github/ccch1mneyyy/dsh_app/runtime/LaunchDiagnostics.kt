@@ -11,8 +11,8 @@ class LaunchDiagnostics {
     @Volatile var failureReason: String? = null
         private set
 
-    fun selected(direct: Boolean, fallback: String?) {
-        selectedMode = if (direct) "direct" else "proot"
+    fun selected(direct: Boolean, fallback: String?, system: Boolean = false) {
+        selectedMode = if (direct) "direct" else if (system) "system" else "proot"
         fallbackReason = fallback
     }
 

@@ -315,14 +315,20 @@ class DshService : Service() {
             val progress = voiceProgress
             if (voice != null && progress != null) builder.setProgress(100, progress.coerceAtLeast(0), progress < 0)
             if (voice != null) builder.setOnlyAlertOnce(true)
-            return builder
+            builder
                 .setSmallIcon(R.drawable.ic_stat_dsh)
                 .setContentTitle(AppStrings.APP_NAME)
                 .setContentText(phoneLine ?: voice ?: text)
                 .setOngoing(true)
                 .setContentIntent(open)
                 .addAction(Notification.Action.Builder(null, AppStrings.get(context, R.string.service_stop), stop).build())
-                .build()
+            // With a system container on the phone: 退出 (app and container), confirmed first.
+            if (SystemContainer.installedVersion(context) != null) {
+                val quit = PendingIntent.getActivity(context, 3, QuitActivity.intent(context),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                builder.addAction(Notification.Action.Builder(null, AppStrings.get(context, R.string.service_quit), quit).build())
+            }
+            return builder.build()
         }
     }
 }

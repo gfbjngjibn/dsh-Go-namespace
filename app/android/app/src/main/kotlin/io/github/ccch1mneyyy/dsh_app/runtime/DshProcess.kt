@@ -17,8 +17,8 @@ import java.nio.file.NoSuchFileException
 import kotlin.concurrent.thread
 
 /**
- * Runs `dsh web` through proot or the optional direct glibc planner, using the
- * same composed manifest configuration. Reports ready after the token and socket.
+ * Runs `dsh web` through proot, the optional direct glibc planner or the optional system
+ * container, using the same composed manifest configuration. Reports ready after the token and socket.
  */
 class DshProcess(
     private val context: Context,
@@ -60,6 +60,13 @@ class DshProcess(
     var direct: Boolean = false
         private set
 
+    /** Run by `dshns exec` in the running [SystemContainer]: stopped by closing its stdin, never by our signals. */
+    var system: Boolean = false
+        private set
+
+    /** Host PID of the engine in the system container, as `dshns exec` reported it. */
+    @Volatile private var launcherPid: Int? = null
+
     val launchDiagnostics = LaunchDiagnostics()
     val executionMode: String? get() = launchDiagnostics.currentMode(process?.isAlive == true)
 
@@ -70,16 +77,24 @@ class DshProcess(
      * [binds] are extra proot `-b host:guest` mounts, inserted before the guest command.
      * [safe] boots the rescue profile instead of `web` (see [SafeMode.profileArg]).
      */
-    fun start(guestEnv: Map<String, String>, binds: List<String> = emptyList(), safe: Boolean = false, phone: Boolean = false, directEngine: Boolean = false, directFailed: Boolean = false, onLaunchMethod: ((Boolean) -> Unit)? = null) {
+    fun start(guestEnv: Map<String, String>, binds: List<String> = emptyList(), safe: Boolean = false, phone: Boolean = false, directEngine: Boolean = false, directFailed: Boolean = false, systemEngine: Boolean = false, systemFailed: Boolean = false, onLaunchMethod: ((Boolean) -> Unit)? = null) {
         check(process == null) { "already started" }
-        var selection = DirectLaunch.select(rootfs, directEngine, safe, directFailed)
+        // The system container (already running: the caller started it) wins over Direct; safe
+        // mode stays on proot like Direct does.
+        val sys = systemEngine && !safe
+        var selection = if (sys) DirectLaunch.Selection(false) else DirectLaunch.select(rootfs, directEngine, safe, directFailed)
         // Only PRoot's fake hard links stand in Direct's way: tidy them once no runtime process is left.
         val tidy = selection.fallbackReason == DirectLaunch.INCOMPATIBLE
         val cleanup = reapStrays(allowObservationGap = !selection.direct && !tidy)
         if (tidy && cleanup.complete) selection = tidyLinks(binds)
-        directFallbackReason = selection.fallbackReason ?: if (directEngine && safe) "safeRecovery" else null
-        launchDiagnostics.selected(selection.direct, directFallbackReason)
+        directFallbackReason = selection.fallbackReason ?: when {
+            (directEngine || systemEngine) && safe -> "safeRecovery"
+            systemFailed && !sys -> SystemContainer.FAILED
+            else -> null
+        }
+        launchDiagnostics.selected(selection.direct, directFallbackReason, sys)
         direct = selection.direct
+        system = sys
         check(cleanup.complete || (!direct && !cleanup.ownedRemaining)) { "runtime cleanup incomplete; stop the engine and retry" }
         if (!cleanup.complete) listener.onLog("[dsh-app] starting proot with incomplete process observation; no captured runtime identities remain", "system")
         val pidFile = File(rootfs, "tmp/dsh-web.pid")
@@ -154,13 +169,24 @@ class DshProcess(
             builder.command(plan.argv).directory(plan.cwd)
             env.clear()
             env.putAll(plan.environment)
+        } else if (system) {
+            builder.command(SystemContainer.execCommand(SystemContainer.layout(context), argv))
+            env.clear()
+            env["PATH"] = "/system/bin:/system/xbin"
         }
 
         readyReported = false
         if (directFallbackReason == DirectLaunch.INCOMPATIBLE) listener.onLog("[dsh-app] direct fallback: proot hard-link backing files need compatible launch; user preference and data retained", "system")
         if (directFallbackReason == DirectLaunch.FAILED) listener.onLog("[dsh-app] direct fallback: direct launch failed before with this runtime; turn Direct on again to retry", "system")
-        listener.onLog("[dsh-app] launch method: ${if (direct) "direct-glibc" else "proot"}${if (directEngine && safe) " (safe recovery)" else ""}", "system")
-        listener.onLog("[dsh-app] launching ${builder.command().joinToString(" ") { redact(it) }}", "system")
+        if (directFallbackReason == SystemContainer.FAILED) listener.onLog("[dsh-app] system container fallback: its launch failed before with this runtime; turn it on again to retry", "system")
+        val method = if (direct) "direct-glibc" else if (system) "system" else "proot"
+        listener.onLog("[dsh-app] launch method: $method${if ((directEngine || systemEngine) && safe) " (safe recovery)" else ""}", "system")
+        // A root launch is one su -c string: log the guest argv, one redacted value at a time.
+        val shown = when {
+            system -> listOf("su --ksu-no-new-privs -c dshns exec") + argv
+            else -> builder.command()
+        }
+        listener.onLog("[dsh-app] launching ${shown.joinToString(" ") { redact(it) }}", "system")
         // stop() came in while this was being prepared: don't launch at all.
         if (stopping) {
             listener.onExit(this, 0, true)
@@ -250,6 +276,10 @@ class DshProcess(
         if (stopper != null) return
         val p = process ?: return
         stopper = thread(name = "dsh-stop", isDaemon = true) {
+            if (system) {
+                stopRooted(p)
+                return@thread
+            }
             try {
                 val node = if (p.isAlive) guestRecord() else null
                 val proot = if (direct) null else node?.let { child -> processSnapshot().records.firstOrNull { it.pid == child.parent && it.proot } }
@@ -267,6 +297,29 @@ class DshProcess(
                     p.waitFor()
                 }
             }
+        }
+    }
+
+    /**
+     * The launcher runs as root in the root manager's domain, out of our reach: closing its
+     * stdin asks it to stop the guest (SIGTERM, then SIGKILL after 5 s). Only if it does not
+     * exit is the process it reported killed through su.
+     */
+    private fun stopRooted(p: Process) {
+        try {
+            runCatching { p.outputStream.close() }
+            if (!waitExit(p, 8000)) {
+                launcherPid?.let { pid ->
+                    listener.onLog("[dsh-app] root launcher still running; killing its guest $pid through su", "system")
+                    runCatching {
+                        val kill = ProcessBuilder("/system/bin/su", "-c", "kill -KILL $pid").redirectErrorStream(true).start()
+                        kill.inputStream.use { it.readBytes() }
+                        kill.waitFor()
+                    }
+                }
+            }
+        } finally {
+            p.waitFor()
         }
     }
 
@@ -306,6 +359,7 @@ class DshProcess(
             reader.useLines { lines ->
                 lines.forEach { line ->
                     listener.onLog(line, stream)
+                    if (launcherPid == null && system) SystemContainer.execPid(line)?.let { launcherPid = it }
                     if (!readyReported) detectToken(line)
                 }
             }

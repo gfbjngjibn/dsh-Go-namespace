@@ -15,7 +15,7 @@ whenToUse: The person reports a problem with DSH Go (lag, heat, battery, connect
 cat "$DSH_HOME/dsh-app/diagnostics.md"      # direct 启动时路径带 rootfs 前缀，以 AGENTS.md 为准
 ```
 
-诊断里有：App 版本与构建号、设备与 Android、运行时版本（内置/已装/DSH/Node）、启动方式（proot/direct）、引擎阶段与安全模式、连接方式、性能档位与温度、最近错误、引擎日志尾部、失败日志尾部。
+诊断里有：App 版本与构建号、设备与 Android、运行时版本（内置/已装/DSH/Node）、启动方式（proot/direct/system）、引擎阶段与安全模式、连接方式、性能档位与温度、最近错误、引擎日志尾部、失败日志尾部。
 
 - 文件不存在或时间戳很旧 → 让用户到 **设置 → 诊断 → 让 AI 看诊断** 重新写一次，再读。
 - 需要日志全文、crash 细节 → 让用户在同一页 **导出诊断包**（zip，已脱敏），用户自己保管/上传，不要替他发。
@@ -47,7 +47,8 @@ cat "$DSH_HOME/dsh-app/diagnostics.md"      # direct 启动时路径带 rootfs �
 
 ### 引擎起不来 / 进了安全模式
 - 诊断看 `运行时状态` 的 phase、error、safeReason、strikes，以及 `内置运行时 / 已装` 是否一致。
-- 常见原因：运行时没装好、存储不足、插件把启动搞崩（安全模式就是为这个准备的）、direct 启动失败回退 proot。
+- 常见原因：运行时没装好、存储不足、插件把启动搞崩（安全模式就是为这个准备的）、direct 启动失败回退 proot、system（系统容器）启动失败回退 direct 或 proot。
+- 系统容器：引擎日志里 `[dshns]` 开头的行是容器启动器的话；引擎能起来时，在容器里用 `systemctl --failed`、`journalctl -b -p err` 看哪个服务坏了。容器停不下、要彻底关，让用户用引擎页的「退出 DSH Go（含容器）」。
 - 先让用户试 **设置 → 引擎 → 重新安装运行时**；插件问题引导到 **设置 → 插件** 停用最近装的。
 - 需要完整日志：导出诊断包。
 
@@ -73,7 +74,7 @@ cat "$DSH_HOME/dsh-app/diagnostics.md"      # direct 启动时路径带 rootfs �
 ## 环境
 - App：<版本> (<构建号>)
 - 设备：<厂商 型号> · Android <版本> (SDK <n>)
-- 运行时：<内置版本> / <DSH 版本> / Node <版本>，启动方式 <proot|direct>
+- 运行时：<内置版本> / <DSH 版本> / Node <版本>，启动方式 <proot|direct|system>
 - 连接：<本机 | 远程 | 未连接>
 
 ## 现象

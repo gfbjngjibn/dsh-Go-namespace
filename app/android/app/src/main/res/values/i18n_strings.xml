@@ -273,6 +273,14 @@
     <string name="service_title">Local DSH</string>
     <string name="service_stop_phone">Stop actions</string>
     <string name="service_stop">Stop</string>
+    <string name="service_quit">Quit</string>
+    <!-- quit (runtime/QuitActivity.kt) -->
+    <string name="quit_title">Quit DSH Go and the container?</string>
+    <string name="quit_message">Stops the local engine, shuts the system container down (the services in it stop too), then closes the app.</string>
+    <string name="quit_confirm">Quit</string>
+    <string name="quit_cancel">Cancel</string>
+    <string name="quit_progress">Stopping the engine and the system container…</string>
+    <string name="quit_container_failed">The system container did not shut down</string>
     <string name="service_package_checksum_failed">Runtime verification failed (SHA-256 mismatch). Reinstall the app</string>
     <string name="service_storage_insufficient">Not enough storage: about %1$s MB needed, %2$s MB available</string>
     <!-- share -->

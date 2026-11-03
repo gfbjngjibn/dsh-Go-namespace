@@ -25,6 +25,7 @@ import '../web/local_web_screen.dart';
 import 'engine_status.dart';
 import 'local_uninstall.dart';
 import 'log_view.dart';
+import 'system_container_section.dart';
 
 /// `rN-dsh…-HASH` → `rN · HASH8`; anything else is shown as is.
 String shortRuntimeVersion(String? v) {
@@ -163,6 +164,7 @@ class EngineScreen extends ConsumerWidget {
                 InfoRow(label: l10n.phoneEngineArchitecture, value: status.abi ?? '—', mono: true),
               ],
             ),
+            const SystemContainerSection(),
             if (!missing)
               SettingsSection(
                 children: [

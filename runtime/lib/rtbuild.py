@@ -508,7 +508,7 @@ def parse_stanzas(text):
 
 
 def base_status(base_tar):
-    with tarfile.open(base_tar, "r:gz") as t:
+    with tarfile.open(base_tar, "r:*") as t:
         for m in t:
             if norm_member(m.name) == "var/lib/dpkg/status":
                 return parse_stanzas(t.extractfile(m).read().decode())
@@ -664,10 +664,11 @@ def cmd_deb_extract(args):
 # rootfs assembly
 # ---------------------------------------------------------------------------
 class Entry:
-    __slots__ = ("kind", "mode", "data", "path", "link", "origin")
+    __slots__ = ("kind", "mode", "data", "path", "link", "origin", "uid", "gid")
 
-    def __init__(self, kind, mode, data=None, path=None, link=None, origin=""):
+    def __init__(self, kind, mode, data=None, path=None, link=None, origin="", uid=0, gid=0):
         self.kind, self.mode, self.data, self.path, self.link, self.origin = kind, mode, data, path, link, origin
+        self.uid, self.gid = uid, gid
 
     def size(self):
         if self.kind != "file":
@@ -679,6 +680,70 @@ class Entry:
             return self.data
         with open(self.path, "rb") as f:
             return f.read()
+
+
+def register_deb(entries, deb, report, drop, drop_reason=lambda p: None):
+    """Unpacks one .deb into entries (members keep their owners) and registers it in the dpkg
+    database the entries hold. Maintainer scripts are installed, never run."""
+    ctl_tar, data_tar = read_deb(deb)
+    with tarfile.open(fileobj=io.BytesIO(ctl_tar), mode="r:") as t:
+        ctl = {norm_member(m.name): t.extractfile(m).read() for m in t if m.isreg()}
+    fields = ctl["control"].decode()
+    pkg = fields.split("\n", 1)[0].split(": ", 1)[1].strip()
+    listed = ["/."]
+    with tarfile.open(fileobj=io.BytesIO(data_tar), mode="r:") as t:
+        for m in t:
+            p = norm_member(m.name)
+            if not p:
+                continue
+            reason = drop_reason(p)
+            if reason:
+                drop(reason, p, m.size)
+                continue
+            if m.isdir():
+                entries.setdefault(p, Entry("dir", m.mode, origin="deb", uid=m.uid, gid=m.gid))
+            elif m.isreg():
+                entries[p] = Entry("file", m.mode, data=t.extractfile(m).read(), origin="deb", uid=m.uid, gid=m.gid)
+            elif m.issym():
+                entries[p] = Entry("symlink", 0o777, link=m.linkname, origin="deb", uid=m.uid, gid=m.gid)
+            elif m.islnk():  # hard link -> independent copy (target precedes it in the tar)
+                src = entries.get(norm_member(m.linkname))
+                if src is None or src.kind != "file":
+                    raise SystemExit("hard link %s -> %s without target in %s" % (m.name, m.linkname, deb))
+                entries[p] = Entry("file", m.mode, data=src.data, origin="deb", uid=m.uid, gid=m.gid)
+                report["convertedHardlinks"].append("%s -> %s" % (p, norm_member(m.linkname)))
+            else:
+                raise SystemExit("unsupported member %s in %s" % (m.name, deb))
+            listed.append("/" + p)
+    meta = dict(l.split(": ", 1) for l in fields.splitlines() if ": " in l and not l.startswith(" "))
+    qualified = pkg + (":" + meta["Architecture"] if meta.get("Multi-Arch") == "same" else "")
+    info = "var/lib/dpkg/info/%s." % qualified
+    entries[info + "list"] = Entry("file", 0o644, data=("\n".join(listed) + "\n").encode(), origin="deb")
+    if "md5sums" in ctl:
+        keep = set(x[1:] for x in listed)
+        lines = [l for l in ctl["md5sums"].decode().splitlines() if l.split("  ", 1)[-1] in keep]
+        entries[info + "md5sums"] = Entry("file", 0o644, data=("\n".join(lines) + "\n").encode(), origin="deb")
+    conffiles = [c.strip() for c in ctl.get("conffiles", b"").decode().splitlines() if c.strip()]
+    conf_lines = []
+    for c in conffiles:
+        e = entries.get(c.lstrip("/"))
+        if e is not None and e.kind == "file":
+            conf_lines.append(" %s %s" % (c, hashlib.md5(e.data).hexdigest()))
+    scripts = sorted(k for k in ctl if k in ("preinst", "postinst", "prerm", "postrm", "triggers"))
+    status = entries["var/lib/dpkg/status"]
+    stanzas = [x for x in status.data.decode().split("\n\n") if x.strip()]
+    stanzas = [x for x in stanzas if not x.startswith("Package: %s\n" % pkg)]
+    head, rest = fields.rstrip("\n").split("\n", 1)
+    stanza = head + "\nStatus: install ok installed\n" + rest
+    if conf_lines:
+        stanza += "\nConffiles:\n" + "\n".join(conf_lines)
+    stanzas.append(stanza)
+    status.data = ("\n\n".join(stanzas) + "\n").encode()
+    for k in scripts:
+        entries[info + k] = Entry("file", 0o755 if k != "triggers" else 0o644, data=ctl[k], origin="deb")
+    report.setdefault("extraDebs", []).append({"package": pkg, "deb": os.path.basename(deb),
+                                                "files": len(listed) - 1,
+                                                "maintainerScriptsNotRun": scripts})
 
 
 def direct_native_inventory(entries):
@@ -934,6 +999,111 @@ class HashingWriter:
         self.sink.flush()
 
 
+def normalize_tree(entries, report):
+    """Adds implicit parent directories, refuses members under a symlink or a non-directory,
+    and makes every symlink relative, refusing one that escapes the root."""
+    for p in list(entries):
+        parent = posixpath.dirname(p)
+        while parent and parent not in entries:
+            entries[parent] = Entry("dir", 0o755, origin="implicit")
+            parent = posixpath.dirname(parent)
+    symlinks = {p for p, e in entries.items() if e.kind == "symlink"}
+    for p in entries:
+        anc = posixpath.dirname(p)
+        while anc:
+            if anc in symlinks:
+                raise SystemExit("member %s lies under symlink %s" % (p, anc))
+            if entries[anc].kind != "dir":
+                raise SystemExit("member %s lies under non-directory %s" % (p, anc))
+            anc = posixpath.dirname(anc)
+    for p in symlinks:
+        e = entries[p]
+        target = e.link
+        here = posixpath.dirname(p)
+        if target.startswith("/"):
+            resolved = posixpath.normpath(target.lstrip("/")) if target.strip("/") else "."
+            report["relativizedSymlinks"] += 1
+        else:
+            stack = here.split("/") if here else []
+            for part in target.split("/"):
+                if part in ("", "."):
+                    continue
+                if part == "..":
+                    if stack:
+                        stack.pop()
+                else:
+                    stack.append(part)
+            resolved = "/".join(stack) or "."
+        rel = posixpath.relpath(resolved, here or ".")
+        if rel != target:
+            e.link = rel
+        if posixpath.normpath(posixpath.join(here, e.link)).startswith(".."):
+            raise SystemExit("symlink escapes root: %s -> %s" % (p, e.link))
+
+
+def write_tar(entries, out, compress, xz_preset, threads, gzip_level, epoch, owners=False):
+    """Writes entries as a sorted GNU tar with a fixed mtime through the compressor. Members are
+    root-owned unless [owners], which keeps each entry's uid/gid. Returns the archive facts."""
+    def sort_key(p):
+        return p.split("/")
+
+    out_tmp = out + ".tmp"
+    if compress == "xz":
+        comp = subprocess.Popen(["xz", "-T%d" % threads, "-%s" % xz_preset, "-c"],
+                                stdin=subprocess.PIPE, stdout=open(out_tmp, "wb"))
+        sink = comp.stdin
+    else:
+        comp = None
+        raw = open(out_tmp, "wb")
+        sink = gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=gzip_level, mtime=0)
+    hw = HashingWriter(sink)
+    counts = {"dir": 0, "file": 0, "symlink": 0}
+    file_bytes = 0
+    with tarfile.open(fileobj=hw, mode="w|", format=tarfile.GNU_FORMAT) as tar:
+        for p in sorted(entries, key=sort_key):
+            e = entries[p]
+            ti = tarfile.TarInfo(p)
+            ti.uid, ti.gid = (e.uid, e.gid) if owners else (0, 0)
+            ti.uname = "root" if ti.uid == 0 else ""
+            ti.gname = "root" if ti.gid == 0 else ""
+            ti.mtime = epoch
+            ti.mode = e.mode
+            counts[e.kind] += 1
+            if e.kind == "dir":
+                ti.type = tarfile.DIRTYPE
+                tar.addfile(ti)
+            elif e.kind == "symlink":
+                ti.type = tarfile.SYMTYPE
+                ti.linkname = e.link
+                tar.addfile(ti)
+            else:
+                data = e.read()
+                ti.size = len(data)
+                file_bytes += len(data)
+                tar.addfile(ti, io.BytesIO(data))
+    if comp is not None:
+        comp.stdin.close()
+        if comp.wait() != 0:
+            raise SystemExit("xz failed")
+    else:
+        sink.close()
+        raw.close()
+    os.replace(out_tmp, out)
+
+    with open(out, "rb") as f:
+        archive_sha = hashlib.file_digest(f, "sha256").hexdigest() if hasattr(hashlib, "file_digest") \
+            else hashlib.sha256(f.read()).hexdigest()
+    return {
+        "archive": os.path.basename(out),
+        "archiveBytes": os.path.getsize(out),
+        "archiveSha256": archive_sha,
+        "tarBytes": hw.n,
+        "tarSha256": hw.h.hexdigest(),
+        "uncompressedBytes": file_bytes,
+        "counts": counts,
+    }
+
+
 def cmd_assemble(args):
     abi = args.abi
     machine = ABI[abi]["machine"]
@@ -976,64 +1146,7 @@ def cmd_assemble(args):
 
     # 1b. extra Architecture: all packages (e.g. tzdata), registered in the dpkg database
     for deb in args.deb or []:
-        ctl_tar, data_tar = read_deb(deb)
-        with tarfile.open(fileobj=io.BytesIO(ctl_tar), mode="r:") as t:
-            ctl = {norm_member(m.name): t.extractfile(m).read() for m in t if m.isreg()}
-        fields = ctl["control"].decode()
-        pkg = fields.split("\n", 1)[0].split(": ", 1)[1].strip()
-        listed = ["/."]
-        with tarfile.open(fileobj=io.BytesIO(data_tar), mode="r:") as t:
-            for m in t:
-                p = norm_member(m.name)
-                if not p:
-                    continue
-                if base_drop(p):
-                    drop("deb-docs", p, m.size)
-                    continue
-                if m.isdir():
-                    entries.setdefault(p, Entry("dir", m.mode, origin="deb"))
-                elif m.isreg():
-                    entries[p] = Entry("file", m.mode, data=t.extractfile(m).read(), origin="deb")
-                elif m.issym():
-                    entries[p] = Entry("symlink", 0o777, link=m.linkname, origin="deb")
-                elif m.islnk():  # hard link -> independent copy (target precedes it in the tar)
-                    src = entries.get(norm_member(m.linkname))
-                    if src is None or src.kind != "file":
-                        raise SystemExit("hard link %s -> %s without target in %s" % (m.name, m.linkname, deb))
-                    entries[p] = Entry("file", m.mode, data=src.data, origin="deb")
-                    report["convertedHardlinks"].append("%s -> %s" % (p, norm_member(m.linkname)))
-                else:
-                    raise SystemExit("unsupported member %s in %s" % (m.name, deb))
-                listed.append("/" + p)
-        meta = dict(l.split(": ", 1) for l in fields.splitlines() if ": " in l and not l.startswith(" "))
-        qualified = pkg + (":" + meta["Architecture"] if meta.get("Multi-Arch") == "same" else "")
-        info = "var/lib/dpkg/info/%s." % qualified
-        entries[info + "list"] = Entry("file", 0o644, data=("\n".join(listed) + "\n").encode(), origin="deb")
-        if "md5sums" in ctl:
-            keep = set(x[1:] for x in listed)
-            lines = [l for l in ctl["md5sums"].decode().splitlines() if l.split("  ", 1)[-1] in keep]
-            entries[info + "md5sums"] = Entry("file", 0o644, data=("\n".join(lines) + "\n").encode(), origin="deb")
-        conffiles = [c.strip() for c in ctl.get("conffiles", b"").decode().splitlines() if c.strip()]
-        conf_lines = []
-        for c in conffiles:
-            e = entries.get(c.lstrip("/"))
-            if e is not None and e.kind == "file":
-                conf_lines.append(" %s %s" % (c, hashlib.md5(e.data).hexdigest()))
-        scripts = sorted(k for k in ctl if k in ("preinst", "postinst", "prerm", "postrm", "triggers"))
-        status = entries["var/lib/dpkg/status"]
-        stanzas = [x for x in status.data.decode().split("\n\n") if x.strip()]
-        stanzas = [x for x in stanzas if not x.startswith("Package: %s\n" % pkg)]
-        head, rest = fields.rstrip("\n").split("\n", 1)
-        stanza = head + "\nStatus: install ok installed\n" + rest
-        if conf_lines:
-            stanza += "\nConffiles:\n" + "\n".join(conf_lines)
-        stanzas.append(stanza)
-        status.data = ("\n\n".join(stanzas) + "\n").encode()
-        for k in scripts:
-            entries[info + k] = Entry("file", 0o755 if k != "triggers" else 0o644, data=ctl[k], origin="deb")
-        report.setdefault("extraDebs", []).append({"package": pkg, "deb": os.path.basename(deb),
-                                                    "files": len(listed) - 1,
-                                                    "maintainerScriptsNotRun": scripts})
+        register_deb(entries, deb, report, drop, lambda p: "deb-docs" if base_drop(p) else None)
     if any(d.get("package") == "ca-certificates" for d in report.get("extraDebs", [])):
         install_ca_bundle(entries, report)
 
@@ -1191,43 +1304,7 @@ def cmd_assemble(args):
         "file", 0o644, data=(json.dumps(direct_native_inventory(entries), sort_keys=True) + "\n").encode(), origin="overlay")
 
     # 6. Implicit parents, symlink normalisation, mode normalisation
-    for p in list(entries):
-        parent = posixpath.dirname(p)
-        while parent and parent not in entries:
-            entries[parent] = Entry("dir", 0o755, origin="implicit")
-            parent = posixpath.dirname(parent)
-    symlinks = {p for p, e in entries.items() if e.kind == "symlink"}
-    for p in entries:
-        anc = posixpath.dirname(p)
-        while anc:
-            if anc in symlinks:
-                raise SystemExit("member %s lies under symlink %s" % (p, anc))
-            if entries[anc].kind != "dir":
-                raise SystemExit("member %s lies under non-directory %s" % (p, anc))
-            anc = posixpath.dirname(anc)
-    for p in symlinks:
-        e = entries[p]
-        target = e.link
-        here = posixpath.dirname(p)
-        if target.startswith("/"):
-            resolved = posixpath.normpath(target.lstrip("/")) if target.strip("/") else "."
-            report["relativizedSymlinks"] += 1
-        else:
-            stack = here.split("/") if here else []
-            for part in target.split("/"):
-                if part in ("", "."):
-                    continue
-                if part == "..":
-                    if stack:
-                        stack.pop()
-                else:
-                    stack.append(part)
-            resolved = "/".join(stack) or "."
-        rel = posixpath.relpath(resolved, here or ".")
-        if rel != target:
-            e.link = rel
-        if posixpath.normpath(posixpath.join(here, e.link)).startswith(".."):
-            raise SystemExit("symlink escapes root: %s -> %s" % (p, e.link))
+    normalize_tree(entries, report)
     for e in entries.values():
         if e.kind == "dir":
             e.mode = (e.mode & 0o1777) | 0o700
@@ -1235,65 +1312,11 @@ def cmd_assemble(args):
             e.mode = (e.mode & 0o777) | 0o600
 
     # 7. Write the tar (GNU format, sorted, root-owned, fixed mtime) through the compressor
-    def sort_key(p):
-        return p.split("/")
-
-    out_tmp = args.out + ".tmp"
-    if args.compress == "xz":
-        comp = subprocess.Popen(["xz", "-T%d" % args.threads, "-%s" % args.xz_preset, "-c"],
-                                stdin=subprocess.PIPE, stdout=open(out_tmp, "wb"))
-        sink = comp.stdin
-    else:
-        comp = None
-        raw = open(out_tmp, "wb")
-        sink = gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=args.gzip_level, mtime=0)
-    hw = HashingWriter(sink)
-    counts = {"dir": 0, "file": 0, "symlink": 0}
-    file_bytes = 0
-    with tarfile.open(fileobj=hw, mode="w|", format=tarfile.GNU_FORMAT) as tar:
-        for p in sorted(entries, key=sort_key):
-            e = entries[p]
-            ti = tarfile.TarInfo(p)
-            ti.uid = ti.gid = 0
-            ti.uname = ti.gname = "root"
-            ti.mtime = args.epoch
-            ti.mode = e.mode
-            counts[e.kind] += 1
-            if e.kind == "dir":
-                ti.type = tarfile.DIRTYPE
-                tar.addfile(ti)
-            elif e.kind == "symlink":
-                ti.type = tarfile.SYMTYPE
-                ti.linkname = e.link
-                tar.addfile(ti)
-            else:
-                data = e.read()
-                ti.size = len(data)
-                file_bytes += len(data)
-                tar.addfile(ti, io.BytesIO(data))
-    if comp is not None:
-        comp.stdin.close()
-        if comp.wait() != 0:
-            raise SystemExit("xz failed")
-    else:
-        sink.close()
-        raw.close()
-    os.replace(out_tmp, args.out)
-
-    with open(args.out, "rb") as f:
-        archive_sha = hashlib.file_digest(f, "sha256").hexdigest() if hasattr(hashlib, "file_digest") \
-            else hashlib.sha256(f.read()).hexdigest()
-    report.update({
-        "archive": os.path.basename(args.out),
-        "archiveBytes": os.path.getsize(args.out),
-        "archiveSha256": archive_sha,
-        "tarBytes": hw.n,
-        "tarSha256": hw.h.hexdigest(),
-        "uncompressedBytes": file_bytes,
-        "counts": counts,
-        "origins": {o: sum(1 for e in entries.values() if e.origin == o)
-                    for o in ("ubuntu", "deb", "python", "node", "dsh", "pnpm", "bridge", "overlay", "implicit")},
-    })
+    report.update(write_tar(entries, args.out, args.compress, args.xz_preset, args.threads, args.gzip_level,
+                            args.epoch))
+    counts, file_bytes = report["counts"], report["uncompressedBytes"]
+    report["origins"] = {o: sum(1 for e in entries.values() if e.origin == o)
+                         for o in ("ubuntu", "deb", "python", "node", "dsh", "pnpm", "bridge", "overlay", "implicit")}
     report["droppedBytes"] = sum(report["dropped"].values())
     with open(args.report, "w") as f:
         json.dump(report, f, indent=2, sort_keys=True)
@@ -1303,6 +1326,162 @@ def cmd_assemble(args):
         report["archiveBytes"] / 2**20))
     if report["warnings"]:
         print("warnings: %d (see %s)" % (len(report["warnings"]), args.report))
+
+
+# ---------------------------------------------------------------------------
+# system container image (runtime/container)
+# ---------------------------------------------------------------------------
+# Owners and set-id bits the app cannot restore when it unpacks the image as its own uid:
+# dshns applies this list as the container's root on the first boot.
+SYSTEM_OWNERSHIP = "var/lib/dsh-go/ownership.tsv"
+SYSTEM_HOSTNAME = "dsh-go"
+# The app writes resolv.conf into the PRoot rootfs (atomically, so a file bind would go stale);
+# dshns binds that rootfs's /etc here, read-only.
+SYSTEM_PROOT_ETC = "/run/dsh-go/proot-etc"
+# Units with nothing to do in the container: the host owns the network, sysfs and /proc/sys.
+SYSTEM_MASKED_UNITS = (
+    "systemd-resolved.service",  # resolv.conf follows the app's
+    "systemd-networkd.service", "systemd-networkd.socket", "systemd-networkd-wait-online.service",
+    "sys-kernel-config.mount", "sys-kernel-debug.mount", "sys-kernel-tracing.mount",
+    "sys-fs-fuse-connections.mount",
+    "systemd-sysctl.service",
+    "proc-sys-fs-binfmt_misc.automount", "proc-sys-fs-binfmt_misc.mount", "systemd-binfmt.service",
+    "motd-news.timer",
+)
+
+
+def system_overlay_entries(info):
+    """Files dsh-go adds to the system image."""
+    E = {}
+
+    def f(path, text, mode=0o644):
+        E[path] = Entry("file", mode, data=text.encode(), origin="overlay")
+
+    f("etc/hostname", SYSTEM_HOSTNAME + "\n")
+    E["etc/resolv.conf"] = Entry("symlink", 0o777, link=SYSTEM_PROOT_ETC + "/resolv.conf", origin="overlay")
+    for unit in SYSTEM_MASKED_UNITS:
+        E["etc/systemd/system/" + unit] = Entry("symlink", 0o777, link="/dev/null", origin="overlay")
+    f("etc/profile.d/dsh-app.sh",
+      "# dsh-app defaults for login shells, as in the PRoot runtime.\n"
+      "export DSH_HOME=\"${DSH_HOME:-/root/.dsh}\"\n"
+      "export pnpm_config_registry=\"${pnpm_config_registry:-%s}\"\n" % NPMMIRROR)
+    f("etc/pip.conf",
+      "# dsh-app: PyPI mirror for users in China (change or delete to use pypi.org).\n"
+      "[global]\nindex-url = https://pypi.tuna.tsinghua.edu.cn/simple\n"
+      "disable-pip-version-check = true\n")
+    # Podman (if the user installs it): the kernel may have no pids controller (crun then
+    # refuses any pids limit), and a bridge cannot be made in the host network the
+    # container shares, so containers default to the host network.
+    f("etc/containers/containers.conf.d/50-dsh-go.conf",
+      "# dsh-app: the system container shares the phone's network and may lack the pids cgroup.\n"
+      "[containers]\npids_limit = 0\nnetns = \"host\"\n")
+    f("var/lib/dsh-go/image.json", json.dumps(info, indent=2, sort_keys=True) + "\n")
+    return E
+
+
+def cmd_system_image(args):
+    entries = {}
+    report = {"abi": args.abi, "dropped": {}, "droppedSamples": {}, "convertedHardlinks": [],
+              "relativizedSymlinks": 0, "xattrsNotKept": []}
+
+    def drop(reason, path, size):
+        report["dropped"][reason] = report["dropped"].get(reason, 0) + size
+        samples = report["droppedSamples"].setdefault(reason, [])
+        if len(samples) < 12:
+            samples.append(path)
+
+    # 1. The prebuilt image, owners and modes as published
+    hardlinks = []
+    with tarfile.open(args.base, "r:*") as t:
+        for m in t:
+            p = norm_member(m.name)
+            if not p:
+                continue
+            if any(k.startswith("SCHILY.xattr.") for k in m.pax_headers):
+                report["xattrsNotKept"].append(p)
+            kw = dict(origin="image", uid=m.uid, gid=m.gid)
+            if m.isdir():
+                entries[p] = Entry("dir", m.mode, **kw)
+            elif m.isreg():
+                entries[p] = Entry("file", m.mode, data=t.extractfile(m).read(), **kw)
+            elif m.issym():
+                entries[p] = Entry("symlink", 0o777, link=m.linkname, **kw)
+            elif m.islnk():
+                hardlinks.append((p, norm_member(m.linkname), m))
+            else:
+                drop("device-or-fifo", p, 0)
+    for p, target, m in hardlinks:  # hard links become independent copies
+        src = entries.get(target)
+        if src is None or src.kind != "file":
+            raise SystemExit("hard link %s -> %s has no regular-file target" % (p, target))
+        entries[p] = Entry("file", m.mode, data=src.data, origin="image", uid=m.uid, gid=m.gid)
+        report["convertedHardlinks"].append("%s -> %s" % (p, target))
+    if entries.get("usr/lib/systemd/systemd") is None:
+        raise SystemExit("no systemd in " + args.base)
+
+    # 2. Extra packages, registered in the image's dpkg database (maintainer scripts not run)
+    for deb in args.deb or []:
+        register_deb(entries, deb, report, drop)
+
+    # 3. Overlay
+    info = json.loads(args.image_info)
+    hosts = entries.get("etc/hosts")
+    if hosts is not None and hosts.kind == "file":
+        hosts.data = hosts.data.replace(b"LXC_NAME", SYSTEM_HOSTNAME.encode())
+    for p, e in system_overlay_entries(info).items():
+        entries[p] = e
+    normalize_tree(entries, report)
+
+    # 4. Owners and set-id bits move to the ownership list: the app unpacks as its own uid
+    rows = []
+    for p in sorted(entries, key=lambda p: p.split("/")):
+        e = entries[p]
+        if e.uid or e.gid or (e.kind != "symlink" and e.mode & 0o6000):
+            if "\n" in p:
+                raise SystemExit("ownership list cannot hold " + repr(p))
+            rows.append("%d %d %o %s" % (e.uid, e.gid, e.mode & 0o7777, p))
+        if e.kind != "symlink":
+            e.mode &= ~0o6000
+    entries[SYSTEM_OWNERSHIP] = Entry("file", 0o644, data=("\n".join(rows) + "\n").encode(), origin="overlay")
+
+    stats = write_tar(entries, args.out, args.compress, args.xz_preset, args.threads, 9, args.epoch, owners=True)
+    report.update(stats)
+    report["ownershipEntries"] = len(rows)
+    report["droppedBytes"] = sum(report["dropped"].values())
+    with open(args.report, "w") as f:
+        json.dump(report, f, indent=2, sort_keys=True)
+        f.write("\n")
+    manifest = dict(info)
+    manifest.update({
+        "schema": 1,
+        "abi": args.abi,
+        "image": stats["archive"],
+        "imageFormat": "tar.xz" if stats["archive"].endswith(".xz") else "tar.gz",
+        "imageSha256": stats["archiveSha256"],
+        "imageBytes": stats["archiveBytes"],
+        "tarBytes": stats["tarBytes"],
+        "tarSha256": stats["tarSha256"],
+        "uncompressedBytes": stats["uncompressedBytes"],
+        "entries": stats["counts"],
+        "ownership": "/" + SYSTEM_OWNERSHIP,
+        "ownershipEntries": len(rows),
+        "archiveNotes": "GNU tar; names relative (no ./); only dirs, regular files and symlinks; hard links "
+                        "converted to copies; every symlink relative and inside the root; set-id bits cleared, "
+                        "owners and full modes of non-root or set-id entries listed in the ownership file",
+        "extraDebs": [{"package": d["package"], "deb": d["deb"]} for d in report.get("extraDebs", [])],
+        "maskedUnits": list(SYSTEM_MASKED_UNITS),
+    })
+    if args.launcher:
+        with open(args.launcher, "rb") as f:
+            data = f.read()
+        manifest["launcher"] = {"jniLib": os.path.basename(args.launcher),
+                                "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+    with open(args.manifest, "w") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+        f.write("\n")
+    print("system image %s: %d files, %d dirs, %d symlinks, %d ownership rows, %.1f MiB unpacked, %.1f MiB archive" % (
+        args.out, stats["counts"]["file"], stats["counts"]["dir"], stats["counts"]["symlink"], len(rows),
+        stats["uncompressedBytes"] / 2**20, stats["archiveBytes"] / 2**20))
 
 
 # ---------------------------------------------------------------------------
@@ -1513,6 +1692,21 @@ def main():
     p.add_argument("--python", help="python-build-standalone install_only tarball -> /opt/python")
     p.add_argument("--bridge", help="dsh-go-bridge package dir -> " + DSH_GO_BRIDGE + " (+ overlay row)")
     p.set_defaults(fn=cmd_assemble)
+
+    p = sub.add_parser("system-image")
+    p.add_argument("--abi", required=True, choices=sorted(ABI))
+    p.add_argument("--base", required=True, help="prebuilt image rootfs tarball (linuxcontainers.org)")
+    p.add_argument("--deb", action="append", help="extra .deb to unpack and register (no maintainer scripts)")
+    p.add_argument("--image-info", required=True, help="JSON: version and provenance, kept in the image and manifest")
+    p.add_argument("--launcher", help="the dshns jniLib, hashed into the manifest")
+    p.add_argument("--out", required=True)
+    p.add_argument("--report", required=True)
+    p.add_argument("--manifest", required=True)
+    p.add_argument("--compress", choices=("xz", "gz"), default="xz")
+    p.add_argument("--xz-preset", default="6")
+    p.add_argument("--threads", type=int, default=0)
+    p.add_argument("--epoch", type=int, default=1767225600)
+    p.set_defaults(fn=cmd_system_image)
 
     p = sub.add_parser("manifest")
     p.add_argument("--abi", required=True)

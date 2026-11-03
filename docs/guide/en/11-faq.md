@@ -34,6 +34,23 @@ Direct local engine launch is off by default; you turn it on under Developer opt
 
 After an upgrade from an earlier version, the first direct start tidies your plugin files once; the engine shows **Tidying plugin files** meanwhile. If the phone is short of space or the tidy-up doesn't finish, that start uses compatible launch, **Fallback reason** on the **Diagnostics** page says why, and the next start carries on. No files are lost.
 
+## Running the engine in the system container
+
+<!-- nav: commonSettings,phoneEngineDiagnostics,phoneDeveloperOptions -->
+`Settings › Diagnostics › Developer options` · [Open](dshgo://open/diagnostics)
+
+**System container launch** is off by default and meant for rooted phones (KernelSU 3.2.5 or SukiSU 4.2.0 or later): the engine runs in an Ubuntu container with systemd as PID 1, so services such as databases can be managed with `systemctl`, and Docker and Podman can be installed. Turning it on runs a requirement check first: a red item blocks it, a yellow kernel option only means its feature is missing. The first start unpacks a system image of about 680 MB.
+
+- It is a separate system from compatible launch: chats, workspaces and settings in `/root`, and DSH itself, are shared; software installed with apt is not, so install it again after switching.
+- The container keeps running after the app closes: force-stopping or updating the app leaves it alone, and the next engine start uses it as it is. To shut it down for good, use **Quit DSH Go (with container)** on the engine page, or **Quit** in the ongoing notification.
+- Docker's and Podman's data live in a storage of their own, capped at 32 GB. It takes only what is written, and what is deleted goes back to the phone; when it runs short, tap **Add 16 GB** on the engine page. For now Podman is the one that runs containers (`apt-get install -y podman`), on the phone's network by default; Docker installs and pulls images but cannot run containers until the container has a network of its own.
+- Backup and restore: **Back up system container** on the engine page stops the container, then packs the system, Docker storage and `/root` into `Download/DSH-Go/backups`; it needs **Access phone files**. The backup holds your chats and API settings: keep it safe. **Restore from backup** replaces the container with a backup.
+- When an app detects root or the container: **Quit DSH Go (with container)** first; the container's mounts and its entries in the kernel go with it. Open DSH Go again when you are done with that app.
+- **Delete system container** deletes the software and Docker data in the container and keeps `/root`. Quit with the container before uninstalling DSH Go; if you don't, the container ends itself once DSH Go's data starts being deleted.
+
+<!-- nav: commonSettings,hubSettingsEngine -->
+`Settings › Local engine` · [Open](dshgo://open/engine)
+
 ## Phone control doesn't work
 
 The top of the phone control page says what's missing:

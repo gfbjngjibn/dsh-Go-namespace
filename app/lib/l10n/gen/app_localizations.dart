@@ -17954,6 +17954,516 @@ abstract class L10n {
   /// **'未能切换启动方式，请停止本机引擎后重试。'**
   String get phoneDirectChangeFailed;
 
+  /// No description provided for @phoneSystemCheckRoot.
+  ///
+  /// In zh, this message translates to:
+  /// **'Root 权限'**
+  String get phoneSystemCheckRoot;
+
+  /// No description provided for @phoneSystemCheckMnt.
+  ///
+  /// In zh, this message translates to:
+  /// **'挂载命名空间'**
+  String get phoneSystemCheckMnt;
+
+  /// No description provided for @phoneSystemCheckPid.
+  ///
+  /// In zh, this message translates to:
+  /// **'进程命名空间'**
+  String get phoneSystemCheckPid;
+
+  /// No description provided for @phoneSystemCheckIpc.
+  ///
+  /// In zh, this message translates to:
+  /// **'IPC 命名空间'**
+  String get phoneSystemCheckIpc;
+
+  /// No description provided for @phoneSystemCheckUts.
+  ///
+  /// In zh, this message translates to:
+  /// **'主机名命名空间'**
+  String get phoneSystemCheckUts;
+
+  /// No description provided for @phoneSystemCheckUser.
+  ///
+  /// In zh, this message translates to:
+  /// **'用户命名空间'**
+  String get phoneSystemCheckUser;
+
+  /// No description provided for @phoneSystemCheckNoNewPrivs.
+  ///
+  /// In zh, this message translates to:
+  /// **'防提权'**
+  String get phoneSystemCheckNoNewPrivs;
+
+  /// No description provided for @phoneSystemCheckTrial.
+  ///
+  /// In zh, this message translates to:
+  /// **'防提权实测'**
+  String get phoneSystemCheckTrial;
+
+  /// No description provided for @phoneSystemCheckRootOk.
+  ///
+  /// In zh, this message translates to:
+  /// **'su 可用，DSH Go 已获授权。'**
+  String get phoneSystemCheckRootOk;
+
+  /// No description provided for @phoneSystemCheckKernelOk.
+  ///
+  /// In zh, this message translates to:
+  /// **'内核支持。'**
+  String get phoneSystemCheckKernelOk;
+
+  /// No description provided for @phoneSystemCheckNoNewPrivsOk.
+  ///
+  /// In zh, this message translates to:
+  /// **'root 管理器支持 --ksu-no-new-privs。'**
+  String get phoneSystemCheckNoNewPrivsOk;
+
+  /// No description provided for @phoneSystemCheckTrialOk.
+  ///
+  /// In zh, this message translates to:
+  /// **'以 DSH Go 的身份执行 su 被拒绝，容器里拿不到整机 root。'**
+  String get phoneSystemCheckTrialOk;
+
+  /// No description provided for @phoneSystemCheckNotGranted.
+  ///
+  /// In zh, this message translates to:
+  /// **'没有 su，或 root 管理器还没给 DSH Go 授权。'**
+  String get phoneSystemCheckNotGranted;
+
+  /// No description provided for @phoneSystemCheckNeedsRoot.
+  ///
+  /// In zh, this message translates to:
+  /// **'需要先有 root 权限。'**
+  String get phoneSystemCheckNeedsRoot;
+
+  /// No description provided for @phoneSystemCheckKernelMissing.
+  ///
+  /// In zh, this message translates to:
+  /// **'内核没有开启这项功能。'**
+  String get phoneSystemCheckKernelMissing;
+
+  /// No description provided for @phoneSystemCheckNoNewPrivsMissing.
+  ///
+  /// In zh, this message translates to:
+  /// **'root 管理器不支持，需要 KernelSU 3.2.5 或 SukiSU 4.2.0 以上。'**
+  String get phoneSystemCheckNoNewPrivsMissing;
+
+  /// No description provided for @phoneSystemCheckSkipped.
+  ///
+  /// In zh, this message translates to:
+  /// **'上面的要求没有全部满足，没有实测。'**
+  String get phoneSystemCheckSkipped;
+
+  /// No description provided for @phoneSystemCheckEscalated.
+  ///
+  /// In zh, this message translates to:
+  /// **'以 DSH Go 的身份仍能通过 su 拿到整机 root。'**
+  String get phoneSystemCheckEscalated;
+
+  /// No description provided for @phoneSystemCheckTimeout.
+  ///
+  /// In zh, this message translates to:
+  /// **'检查超时。'**
+  String get phoneSystemCheckTimeout;
+
+  /// No description provided for @phoneSystemCheckPassed.
+  ///
+  /// In zh, this message translates to:
+  /// **'全部满足。'**
+  String get phoneSystemCheckPassed;
+
+  /// No description provided for @phoneSystemCheckError.
+  ///
+  /// In zh, this message translates to:
+  /// **'检查没能完成，请稍后再试。'**
+  String get phoneSystemCheckError;
+
+  /// No description provided for @phoneSystemEnable.
+  ///
+  /// In zh, this message translates to:
+  /// **'开启'**
+  String get phoneSystemEnable;
+
+  /// No description provided for @phoneSystemEngine.
+  ///
+  /// In zh, this message translates to:
+  /// **'系统容器启动'**
+  String get phoneSystemEngine;
+
+  /// No description provided for @phoneSystemHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'实验功能，默认关闭，下次启动生效，开启后优先于直接启动。需要 KernelSU 3.2.5 或 SukiSU 4.2.0 以上，并在 root 管理器里给 DSH Go 授予 root。引擎运行在以 systemd 为 1 号进程的 Ubuntu 系统容器里，数据库等服务可以用 systemctl 管理，Docker 和 Podman 的数据放在单独的存储里；容器和手机共用网络，容器里的 root 不能提权到整机。它和兼容启动是两套系统：/root 和 DSH 本身共用，apt 装的软件不共用。App 关闭或更新时容器继续运行。第一次启动会解压约 680 MB 的系统镜像。启动失败时自动改用直接启动或兼容启动。'**
+  String get phoneSystemHint;
+
+  /// No description provided for @phoneSystemFailedHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'这台手机上系统容器启动没有成功，已改用直接启动或兼容启动。停止引擎后打开可再试一次。'**
+  String get phoneSystemFailedHint;
+
+  /// No description provided for @phoneSystemCheck.
+  ///
+  /// In zh, this message translates to:
+  /// **'检查系统容器运行要求'**
+  String get phoneSystemCheck;
+
+  /// No description provided for @phoneSystemCheckHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'Root 权限、命名空间、防提权、cgroup2 和内核功能'**
+  String get phoneSystemCheckHint;
+
+  /// No description provided for @phoneSystemCheckTitle.
+  ///
+  /// In zh, this message translates to:
+  /// **'系统容器运行要求'**
+  String get phoneSystemCheckTitle;
+
+  /// No description provided for @phoneSystemChecking.
+  ///
+  /// In zh, this message translates to:
+  /// **'正在检查…'**
+  String get phoneSystemChecking;
+
+  /// No description provided for @phoneSystemCheckCgroupNs.
+  ///
+  /// In zh, this message translates to:
+  /// **'cgroup 命名空间'**
+  String get phoneSystemCheckCgroupNs;
+
+  /// No description provided for @phoneSystemCheckCgroup2.
+  ///
+  /// In zh, this message translates to:
+  /// **'cgroup2 委派'**
+  String get phoneSystemCheckCgroup2;
+
+  /// No description provided for @phoneSystemCheckCgroup2Ok.
+  ///
+  /// In zh, this message translates to:
+  /// **'可以为容器建立单独的 cgroup，并一次结束其中所有进程。'**
+  String get phoneSystemCheckCgroup2Ok;
+
+  /// No description provided for @phoneSystemCheckCgroup2Missing.
+  ///
+  /// In zh, this message translates to:
+  /// **'没有可用的 cgroup2，或内核早于 5.14（没有 cgroup.kill）。'**
+  String get phoneSystemCheckCgroup2Missing;
+
+  /// No description provided for @phoneSystemCheckLauncher.
+  ///
+  /// In zh, this message translates to:
+  /// **'容器启动器'**
+  String get phoneSystemCheckLauncher;
+
+  /// No description provided for @phoneSystemCheckLauncherOk.
+  ///
+  /// In zh, this message translates to:
+  /// **'dshns 已随 App 安装。'**
+  String get phoneSystemCheckLauncherOk;
+
+  /// No description provided for @phoneSystemCheckLauncherMissing.
+  ///
+  /// In zh, this message translates to:
+  /// **'这个安装包里没有 dshns。'**
+  String get phoneSystemCheckLauncherMissing;
+
+  /// No description provided for @phoneSystemCheckImage.
+  ///
+  /// In zh, this message translates to:
+  /// **'系统镜像'**
+  String get phoneSystemCheckImage;
+
+  /// No description provided for @phoneSystemCheckImageMissing.
+  ///
+  /// In zh, this message translates to:
+  /// **'这个安装包没有带系统镜像。'**
+  String get phoneSystemCheckImageMissing;
+
+  /// No description provided for @phoneSystemCheckOptionOn.
+  ///
+  /// In zh, this message translates to:
+  /// **'已开启。'**
+  String get phoneSystemCheckOptionOn;
+
+  /// No description provided for @phoneSystemCheckOptionOff.
+  ///
+  /// In zh, this message translates to:
+  /// **'未开启。'**
+  String get phoneSystemCheckOptionOff;
+
+  /// No description provided for @phoneSystemCheckOptionUnknown.
+  ///
+  /// In zh, this message translates to:
+  /// **'读不到内核配置，无法确认。'**
+  String get phoneSystemCheckOptionUnknown;
+
+  /// No description provided for @phoneSystemCheckOffPids.
+  ///
+  /// In zh, this message translates to:
+  /// **'未开启：不能限制容器的进程数，不影响使用。'**
+  String get phoneSystemCheckOffPids;
+
+  /// No description provided for @phoneSystemCheckOffNftables.
+  ///
+  /// In zh, this message translates to:
+  /// **'未开启：容器里用不了 nftables，防火墙规则请用 iptables-legacy。'**
+  String get phoneSystemCheckOffNftables;
+
+  /// No description provided for @phoneSystemCheckOffBridgeNetfilter.
+  ///
+  /// In zh, this message translates to:
+  /// **'未开启：Docker 默认网桥上的流量过滤不可用。'**
+  String get phoneSystemCheckOffBridgeNetfilter;
+
+  /// No description provided for @phoneSystemCheckOffAutofs.
+  ///
+  /// In zh, this message translates to:
+  /// **'未开启：systemd 的自动挂载不可用，镜像已屏蔽相关单元。'**
+  String get phoneSystemCheckOffAutofs;
+
+  /// No description provided for @phoneSystemCheckOffCheckpoint.
+  ///
+  /// In zh, this message translates to:
+  /// **'未开启：CRIU 检查点和恢复不可用。'**
+  String get phoneSystemCheckOffCheckpoint;
+
+  /// No description provided for @phoneSystemCheckPassedWarn.
+  ///
+  /// In zh, this message translates to:
+  /// **'可以开启。标黄的内核功能没有开启，相应的功能用不了。'**
+  String get phoneSystemCheckPassedWarn;
+
+  /// No description provided for @phoneSystemCheckFailed.
+  ///
+  /// In zh, this message translates to:
+  /// **'有要求没满足，不能开启系统容器启动。'**
+  String get phoneSystemCheckFailed;
+
+  /// No description provided for @phoneLaunchSystem.
+  ///
+  /// In zh, this message translates to:
+  /// **'系统容器'**
+  String get phoneLaunchSystem;
+
+  /// No description provided for @phoneSystemLaunchFailed.
+  ///
+  /// In zh, this message translates to:
+  /// **'系统容器启动未成功'**
+  String get phoneSystemLaunchFailed;
+
+  /// No description provided for @phoneSystemContainer.
+  ///
+  /// In zh, this message translates to:
+  /// **'系统容器'**
+  String get phoneSystemContainer;
+
+  /// No description provided for @phoneSystemState.
+  ///
+  /// In zh, this message translates to:
+  /// **'状态'**
+  String get phoneSystemState;
+
+  /// No description provided for @phoneSystemRunning.
+  ///
+  /// In zh, this message translates to:
+  /// **'运行中'**
+  String get phoneSystemRunning;
+
+  /// No description provided for @phoneSystemBusy.
+  ///
+  /// In zh, this message translates to:
+  /// **'处理中…'**
+  String get phoneSystemBusy;
+
+  /// No description provided for @phoneSystemNotInstalled.
+  ///
+  /// In zh, this message translates to:
+  /// **'未安装'**
+  String get phoneSystemNotInstalled;
+
+  /// No description provided for @phoneSystemImage.
+  ///
+  /// In zh, this message translates to:
+  /// **'镜像'**
+  String get phoneSystemImage;
+
+  /// No description provided for @phoneSystemStart.
+  ///
+  /// In zh, this message translates to:
+  /// **'启动容器'**
+  String get phoneSystemStart;
+
+  /// No description provided for @phoneSystemStartHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'systemd 会启动容器里的服务；App 关闭后容器继续运行。'**
+  String get phoneSystemStartHint;
+
+  /// No description provided for @phoneSystemStartInstallHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'第一次启动要先解压系统镜像（约 680 MB），需要一两分钟。'**
+  String get phoneSystemStartInstallHint;
+
+  /// No description provided for @phoneSystemStop.
+  ///
+  /// In zh, this message translates to:
+  /// **'停止容器'**
+  String get phoneSystemStop;
+
+  /// No description provided for @phoneSystemStopHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'让 systemd 正常关机，一分钟内没关完就强制结束。'**
+  String get phoneSystemStopHint;
+
+  /// No description provided for @phoneSystemStopEngineFirst.
+  ///
+  /// In zh, this message translates to:
+  /// **'引擎正在容器里运行，请先停止引擎。'**
+  String get phoneSystemStopEngineFirst;
+
+  /// No description provided for @phoneSystemDelete.
+  ///
+  /// In zh, this message translates to:
+  /// **'删除系统容器'**
+  String get phoneSystemDelete;
+
+  /// No description provided for @phoneSystemDeleteHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'删除容器里装的软件和数据，含 Docker 存储；/root 和 DSH 的数据保留。'**
+  String get phoneSystemDeleteHint;
+
+  /// No description provided for @phoneSystemDeleteTitle.
+  ///
+  /// In zh, this message translates to:
+  /// **'删除系统容器？'**
+  String get phoneSystemDeleteTitle;
+
+  /// No description provided for @phoneSystemDeleteBody.
+  ///
+  /// In zh, this message translates to:
+  /// **'容器里用 apt 装的软件、数据库、Docker 和 Podman 的镜像与数据，以及其他文件都会删除；/root 里的对话、工作区和设置保留。下次启动容器时会重新解压镜像。'**
+  String get phoneSystemDeleteBody;
+
+  /// No description provided for @phoneSystemActionFailed.
+  ///
+  /// In zh, this message translates to:
+  /// **'操作没有完成，详情见引擎日志。'**
+  String get phoneSystemActionFailed;
+
+  /// No description provided for @phoneSystemStorage.
+  ///
+  /// In zh, this message translates to:
+  /// **'Docker 存储'**
+  String get phoneSystemStorage;
+
+  /// No description provided for @phoneSystemStorageValue.
+  ///
+  /// In zh, this message translates to:
+  /// **'已用 {used}，上限 {ceiling}'**
+  String phoneSystemStorageValue(String used, String ceiling);
+
+  /// No description provided for @phoneSystemStorageNone.
+  ///
+  /// In zh, this message translates to:
+  /// **'第一次启动容器时创建'**
+  String get phoneSystemStorageNone;
+
+  /// No description provided for @phoneSystemGrow.
+  ///
+  /// In zh, this message translates to:
+  /// **'扩容 16 GB'**
+  String get phoneSystemGrow;
+
+  /// No description provided for @phoneSystemGrowHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'提高 Docker 和 Podman 存储的上限。只占实际写入的空间，删掉的会还给手机。'**
+  String get phoneSystemGrowHint;
+
+  /// No description provided for @phoneSystemBackup.
+  ///
+  /// In zh, this message translates to:
+  /// **'备份系统容器'**
+  String get phoneSystemBackup;
+
+  /// No description provided for @phoneSystemBackupHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'先停止容器，再把系统、Docker 存储和 /root 打包到 Download/DSH-Go/backups。备份里有对话和 API 配置，请妥善保管。'**
+  String get phoneSystemBackupHint;
+
+  /// No description provided for @phoneSystemBackupNeedsStorage.
+  ///
+  /// In zh, this message translates to:
+  /// **'备份和恢复需要先在设置里打开「访问手机文件」。'**
+  String get phoneSystemBackupNeedsStorage;
+
+  /// No description provided for @phoneSystemBackupDone.
+  ///
+  /// In zh, this message translates to:
+  /// **'已备份到 Download/DSH-Go/backups'**
+  String get phoneSystemBackupDone;
+
+  /// No description provided for @phoneSystemRestore.
+  ///
+  /// In zh, this message translates to:
+  /// **'从备份恢复'**
+  String get phoneSystemRestore;
+
+  /// No description provided for @phoneSystemRestoreHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'用一个备份替换当前的系统容器'**
+  String get phoneSystemRestoreHint;
+
+  /// No description provided for @phoneSystemRestoreNone.
+  ///
+  /// In zh, this message translates to:
+  /// **'Download/DSH-Go/backups 里还没有备份。'**
+  String get phoneSystemRestoreNone;
+
+  /// No description provided for @phoneSystemRestoreTitle.
+  ///
+  /// In zh, this message translates to:
+  /// **'恢复这个备份？'**
+  String get phoneSystemRestoreTitle;
+
+  /// No description provided for @phoneSystemRestoreBody.
+  ///
+  /// In zh, this message translates to:
+  /// **'当前系统容器里的软件、数据库和 Docker 数据会被删除，换成备份里的内容；/root 里备份中也有的文件会被覆盖。'**
+  String get phoneSystemRestoreBody;
+
+  /// No description provided for @phoneSystemRestoreConfirm.
+  ///
+  /// In zh, this message translates to:
+  /// **'恢复'**
+  String get phoneSystemRestoreConfirm;
+
+  /// No description provided for @phoneSystemRestoreDone.
+  ///
+  /// In zh, this message translates to:
+  /// **'已恢复'**
+  String get phoneSystemRestoreDone;
+
+  /// No description provided for @phoneQuitAll.
+  ///
+  /// In zh, this message translates to:
+  /// **'退出 DSH Go（含容器）'**
+  String get phoneQuitAll;
+
+  /// No description provided for @phoneQuitAllHint.
+  ///
+  /// In zh, this message translates to:
+  /// **'停止引擎，让系统容器正常关机，然后退出 App。'**
+  String get phoneQuitAllHint;
+
   /// No description provided for @phoneActualLaunchMode.
   ///
   /// In zh, this message translates to:

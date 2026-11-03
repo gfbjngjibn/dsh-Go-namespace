@@ -147,6 +147,31 @@ class RuntimePlugin :
                     result.error("launch_method_unavailable", error.message, null)
                 }
             }
+            "checkSystemContainer" -> {
+                // su and unshare probes, and a trial su under no-new-privs: seconds, never on the main thread.
+                val main = android.os.Handler(android.os.Looper.getMainLooper())
+                kotlin.concurrent.thread(name = "dsh-system-check", isDaemon = true) {
+                    val items = runCatching { SystemCheck.run(appContext).map { it.toMap() } }
+                    main.post {
+                        items.fold({ result.success(it) }, { result.error("system_check_failed", it.message, null) })
+                    }
+                }
+            }
+            "setSystemEngine" -> {
+                try {
+                    controller.setSystemEngine(call.argument<Boolean>("enabled") == true)
+                    result.success(null)
+                } catch (error: IllegalStateException) {
+                    result.error("launch_method_unavailable", error.message, null)
+                }
+            }
+            "systemContainer" -> controller.systemContainer(call.argument<String>("action") ?: "", call.argument<String>("name")) { error ->
+                if (error == null) result.success(null) else result.error("system_container_failed", error.message, null)
+            }
+            "quit" -> {
+                appContext.startActivity(QuitActivity.intent(appContext))
+                result.success(null)
+            }
             "failureLog" -> result.success(controller.failureLog())
             "batteryExempt" -> {
                 val pm = appContext.getSystemService(Context.POWER_SERVICE) as PowerManager

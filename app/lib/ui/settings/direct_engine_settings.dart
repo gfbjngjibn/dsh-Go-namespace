@@ -5,10 +5,11 @@ import '../../l10n/l10n.dart';
 import '../../runtime/runtime_bridge.dart';
 import '../../runtime/runtime_state.dart';
 import '../common/brief_notice.dart';
+import 'system_check_sheet.dart';
 import 'settings_widgets.dart';
 
-/// Direct launch, on by default; a change applies only after a deliberate
-/// engine stop/start.
+/// Direct launch, the rooted namespace launch and the system container, all off
+/// by default; a change applies only after a deliberate engine stop/start.
 class DirectEngineSettings extends ConsumerStatefulWidget {
   const DirectEngineSettings({super.key});
 
@@ -44,6 +45,13 @@ class _DirectEngineSettingsState extends ConsumerState<DirectEngineSettings> {
         : status.inSafeMode
         ? l10n.phoneDirectSafeHint
         : l10n.phoneDirectHint;
+    final systemHint = status.systemEngineFailed && !status.systemEngineEnabled
+        ? l10n.phoneSystemFailedHint
+        : !stopped
+        ? l10n.phoneDirectStopFirst
+        : status.inSafeMode
+        ? l10n.phoneDirectSafeHint
+        : l10n.phoneSystemHint;
 
     return SettingsSection(
       title: l10n.phoneDeveloperOptions,
@@ -62,14 +70,37 @@ class _DirectEngineSettingsState extends ConsumerState<DirectEngineSettings> {
           value: status.directEngineEnabled,
           onChanged: enabled ? _change : null,
         ),
+        // Only in builds that carry a system image (arm64).
+        if (status.systemImage != null) ...[
+          SettingsSwitchTile(
+            title: l10n.phoneSystemEngine,
+            subtitle: systemHint,
+            value: status.systemEngineEnabled,
+            onChanged: runtime.loaded && stopped && !_saving ? _changeSystem : null,
+          ),
+          SettingsTile(
+            title: l10n.phoneSystemCheck,
+            subtitle: l10n.phoneSystemCheckHint,
+            onTap: runtime.loaded && !_saving ? () => showSystemCheckSheet(context) : null,
+          ),
+        ],
       ],
     );
   }
 
-  Future<void> _change(bool value) async {
+  Future<void> _change(bool value) => _save(() => ref.read(runtimeBridgeProvider).setDirectEngine(value));
+
+  /// Turning it on goes through the requirement check: on only through a pass (warnings allowed).
+  Future<void> _changeSystem(bool value) async {
+    if (value && !await showSystemCheckSheet(context, enabling: true)) return;
+    if (!mounted) return;
+    await _save(() => ref.read(runtimeBridgeProvider).setSystemEngine(value));
+  }
+
+  Future<void> _save(Future<void> Function() change) async {
     setState(() => _saving = true);
     try {
-      await ref.read(runtimeBridgeProvider).setDirectEngine(value);
+      await change();
     } catch (_) {
       if (mounted) showBriefNotice(context, context.l10n.phoneDirectChangeFailed);
     } finally {

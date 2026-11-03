@@ -20,6 +20,25 @@ class GuestAgentsModeTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun theSystemContainerKeepsTheSandboxAndWarnsAgainstShuttingItDown() {
+        val root = kotlin.io.path.createTempDirectory("agents-system").toFile()
+        try {
+            val file = File(root, "root/.dsh/AGENTS.md")
+            GuestSetup.writeAgentsMd(root, phoneStorage = false)
+            val proot = file.readText()
+            assertTrue(proot.contains("一定会被拒绝") && proot.contains("danger-full-access"))
+            GuestSetup.writeAgentsMd(root, phoneStorage = false, systemEngine = true)
+            val system = file.readText()
+            assertTrue(system.contains("系统容器里") && system.contains("沙箱可用（Landlock）"))
+            assertFalse(system.contains("一定会被拒绝") || system.contains("danger-full-access") || system.contains("proot，免 Root"))
+            assertTrue(system.contains("apt-get install -y <包名>`（需要联网）。装的软件只在系统容器里"))
+            assertTrue(system.contains("\n- 不要执行 `reboot`"))
+            assertTrue(system.contains("\n- 容器工具用 Podman"))
+            GuestSetup.writeAgentsMd(root, phoneStorage = false)
+            assertEquals(proot, file.readText())
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun aUserOwnedFileIsUnchangedAcrossBothLaunchModes() {
         val root = kotlin.io.path.createTempDirectory("agents-user").toFile()
         try {

@@ -97,6 +97,8 @@ object CrashClassifier {
         Regex("^Error \\[ERR_MODULE_NOT_FOUND]: Cannot find module ['\"].*/opt/dsh-go/direct/(?:preload|dns|paths|processes|modules)\\.mjs['\"].*$"),
         Regex("^DshDirectModuleIdentityError: this file needs compatible launch; stop the engine and turn off Direct engine$"),
     )
+    /** dshns exec's own failure line (no container, a namespace it cannot enter); not its PID note. */
+    private val SYSTEM_FAILED = Regex("^\\[dshns] (?!exec pid=|join ).+")
     /**
      * 128 + SIGSYS: Android's seccomp filter killed the direct loader or node for a
      * syscall it forbids (glibc's `access` on x86_64). The kill prints nothing.
@@ -127,13 +129,15 @@ object CrashClassifier {
         tail: List<String>,
         safeMode: Boolean,
         directEngine: Boolean = false,
+        systemEngine: Boolean = false,
     ): RunFailure {
         // V8 running out of heap while starting or just after counts like a DSH fatal (#75);
         // later it stays KILLED, which restarts. Neither names a culprit plugin.
         val early = exitCode != 0 && (readyAt == null || now - readyAt <= EARLY_WINDOW_MS)
         val fatal = tail.firstOrNull(::isFatal) ?: tail.firstOrNull { HEAP_OOM.matches(it) }?.takeIf { early }
         val launch = if (readyAt == null && exitCode != 0) tail.firstOrNull {
-            EXEC_FAILED.matches(it) || (directEngine && DIRECT_FAILED.any { pattern -> pattern.matches(it) })
+            EXEC_FAILED.matches(it) || (directEngine && DIRECT_FAILED.any { pattern -> pattern.matches(it) }) ||
+                (systemEngine && SYSTEM_FAILED.matches(it))
         } ?: (if (directEngine && exitCode == SIGSYS_EXIT) SECCOMP_KILLED else null) else null
         val kind = when {
             tail.any { NO_SPACE.containsMatchIn(it) } -> FailureKind.NO_SPACE

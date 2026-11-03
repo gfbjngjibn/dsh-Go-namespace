@@ -69,6 +69,18 @@ object GuestSetup {
         |""").trimMargin()
 
     // l10n:keep agent prompt
+    private const val PROOT_ENVIRONMENT = "Ubuntu 24.04 环境里（proot，免 Root）。这里没有可用的沙箱后端（bubblewrap / Landlock 都不可用），`workspace-write` 沙箱模式一定会被拒绝。"
+    // l10n:keep agent prompt
+    private const val SYSTEM_ENVIRONMENT = "Ubuntu 24.04 系统容器里（systemd 管理服务，可用 systemctl；容器内你是 root，宿主上只是本 App 的普通用户，不能提权；和手机共用网络，监听 0.0.0.0 的服务局域网可见）。这里的沙箱可用（Landlock），`workspace-write` 等沙箱模式照常使用。"
+    // l10n:keep agent prompt
+    private const val PROOT_SANDBOX_ADVICE = "- 需要执行 bash 命令时，直接用 `sandbox_permissions: \"danger-full-access\"` 申请运行，并用一句话写明理由；不要先试沙箱模式。\n"
+    private const val APT_LINE_END = "`apt-get update && apt-get install -y <包名>`（需要联网）。"
+    // l10n:keep agent prompt
+    private const val SYSTEM_EXTRA = "装的软件只在系统容器里，用户换回兼容启动后就没有了。\n" +
+        "- 不要执行 `reboot`、`poweroff`、`halt`、`systemctl isolate` 这类关机或切换目标的命令：会把容器连同引擎一起关掉，而且不会自己重新启动。\n" +
+        "- 容器工具用 Podman（`apt-get install -y podman`）：数据在单独的存储里，`podman run` 默认用主机网络，不能建网桥。Docker 能装、能拉镜像，但跑不起容器（它要的网络命名空间这里还没有）。"
+
+    // l10n:keep agent prompt
     private val DIAGNOSTICS_SECTION = """
         |
         |## 本机诊断
@@ -100,6 +112,7 @@ object GuestSetup {
         phoneControl: Boolean = false,
         visualReplies: Boolean = true,
         directEngine: Boolean = false,
+        systemEngine: Boolean = false,
     ) {
         try {
             val file = File(rootfs, "root/.dsh/AGENTS.md")
@@ -109,6 +122,12 @@ object GuestSetup {
                 AGENTS_MD.replace("Ubuntu 24.04 环境里（proot，免 Root）", "Ubuntu 24.04 运行环境里（引擎直接启动，bash/git/python/apt 工具仍经 proot）")
                     .replace("`/root/workspace`", "`${rootfs.canonicalPath}/root/workspace`") +
                     "\n- 文件工具、会话目录、@ 引用、AGENTS 和 skills 使用同一个完整绝对路径；该路径在 shell 内也同名可见。旧的 `/root` 路径仍可用于文件工具。shell 的输出不改写，不要删除路径的前缀。\n"
+            } else if (systemEngine) {
+                // The container runs outside Android's app sandbox: Landlock enforces there, so
+                // DSH's own sandbox works and the PRoot advice to skip it does not apply.
+                // l10n:keep agent prompt
+                AGENTS_MD.replace(PROOT_ENVIRONMENT, SYSTEM_ENVIRONMENT).replace(PROOT_SANDBOX_ADVICE, "")
+                    .replace(APT_LINE_END, APT_LINE_END + SYSTEM_EXTRA)
             } else AGENTS_MD
             val text = environment.replace(
                 "{STORAGE_LINE}",
@@ -182,11 +201,17 @@ object GuestSetup {
             if (!etc.isDirectory && !etc.mkdirs() && !etc.isDirectory) throw IOException("Cannot prepare resolver directory")
             val target = File(etc, "resolv.conf")
             stage = DnsConfigStage.READ
-            if (target.isFile && target.readText() == text) return DnsConfigReport(DnsConfigOutcome.UNCHANGED, requested)
+            // Readable by every user: the system container's own users (apt's _apt, a database's)
+            // resolve through this file too, and the app's umask would leave it owner-only.
+            if (target.isFile && target.readText() == text) {
+                target.setReadable(true, false)
+                return DnsConfigReport(DnsConfigOutcome.UNCHANGED, requested)
+            }
             // Swapped in whole while DSH runs; also replaces a symlink (e.g. to systemd-resolved) with a plain file.
             val temp = File(etc, ".resolv.conf.dsh-tmp")
             stage = DnsConfigStage.WRITE
             temp.writeText(text)
+            temp.setReadable(true, false)
             stage = DnsConfigStage.REPLACE
             replace(temp.path, target.path)
             return DnsConfigReport(DnsConfigOutcome.WRITTEN, requested)

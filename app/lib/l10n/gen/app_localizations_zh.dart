@@ -9738,6 +9738,265 @@ class L10nZh extends L10n {
   String get phoneDirectChangeFailed => '未能切换启动方式，请停止本机引擎后重试。';
 
   @override
+  String get phoneSystemCheckRoot => 'Root 权限';
+
+  @override
+  String get phoneSystemCheckMnt => '挂载命名空间';
+
+  @override
+  String get phoneSystemCheckPid => '进程命名空间';
+
+  @override
+  String get phoneSystemCheckIpc => 'IPC 命名空间';
+
+  @override
+  String get phoneSystemCheckUts => '主机名命名空间';
+
+  @override
+  String get phoneSystemCheckUser => '用户命名空间';
+
+  @override
+  String get phoneSystemCheckNoNewPrivs => '防提权';
+
+  @override
+  String get phoneSystemCheckTrial => '防提权实测';
+
+  @override
+  String get phoneSystemCheckRootOk => 'su 可用，DSH Go 已获授权。';
+
+  @override
+  String get phoneSystemCheckKernelOk => '内核支持。';
+
+  @override
+  String get phoneSystemCheckNoNewPrivsOk => 'root 管理器支持 --ksu-no-new-privs。';
+
+  @override
+  String get phoneSystemCheckTrialOk => '以 DSH Go 的身份执行 su 被拒绝，容器里拿不到整机 root。';
+
+  @override
+  String get phoneSystemCheckNotGranted => '没有 su，或 root 管理器还没给 DSH Go 授权。';
+
+  @override
+  String get phoneSystemCheckNeedsRoot => '需要先有 root 权限。';
+
+  @override
+  String get phoneSystemCheckKernelMissing => '内核没有开启这项功能。';
+
+  @override
+  String get phoneSystemCheckNoNewPrivsMissing => 'root 管理器不支持，需要 KernelSU 3.2.5 或 SukiSU 4.2.0 以上。';
+
+  @override
+  String get phoneSystemCheckSkipped => '上面的要求没有全部满足，没有实测。';
+
+  @override
+  String get phoneSystemCheckEscalated => '以 DSH Go 的身份仍能通过 su 拿到整机 root。';
+
+  @override
+  String get phoneSystemCheckTimeout => '检查超时。';
+
+  @override
+  String get phoneSystemCheckPassed => '全部满足。';
+
+  @override
+  String get phoneSystemCheckError => '检查没能完成，请稍后再试。';
+
+  @override
+  String get phoneSystemEnable => '开启';
+
+  @override
+  String get phoneSystemEngine => '系统容器启动';
+
+  @override
+  String get phoneSystemHint =>
+      '实验功能，默认关闭，下次启动生效，开启后优先于直接启动。需要 KernelSU 3.2.5 或 SukiSU 4.2.0 以上，并在 root 管理器里给 DSH Go 授予 root。引擎运行在以 systemd 为 1 号进程的 Ubuntu 系统容器里，数据库等服务可以用 systemctl 管理，Docker 和 Podman 的数据放在单独的存储里；容器和手机共用网络，容器里的 root 不能提权到整机。它和兼容启动是两套系统：/root 和 DSH 本身共用，apt 装的软件不共用。App 关闭或更新时容器继续运行。第一次启动会解压约 680 MB 的系统镜像。启动失败时自动改用直接启动或兼容启动。';
+
+  @override
+  String get phoneSystemFailedHint => '这台手机上系统容器启动没有成功，已改用直接启动或兼容启动。停止引擎后打开可再试一次。';
+
+  @override
+  String get phoneSystemCheck => '检查系统容器运行要求';
+
+  @override
+  String get phoneSystemCheckHint => 'Root 权限、命名空间、防提权、cgroup2 和内核功能';
+
+  @override
+  String get phoneSystemCheckTitle => '系统容器运行要求';
+
+  @override
+  String get phoneSystemChecking => '正在检查…';
+
+  @override
+  String get phoneSystemCheckCgroupNs => 'cgroup 命名空间';
+
+  @override
+  String get phoneSystemCheckCgroup2 => 'cgroup2 委派';
+
+  @override
+  String get phoneSystemCheckCgroup2Ok => '可以为容器建立单独的 cgroup，并一次结束其中所有进程。';
+
+  @override
+  String get phoneSystemCheckCgroup2Missing => '没有可用的 cgroup2，或内核早于 5.14（没有 cgroup.kill）。';
+
+  @override
+  String get phoneSystemCheckLauncher => '容器启动器';
+
+  @override
+  String get phoneSystemCheckLauncherOk => 'dshns 已随 App 安装。';
+
+  @override
+  String get phoneSystemCheckLauncherMissing => '这个安装包里没有 dshns。';
+
+  @override
+  String get phoneSystemCheckImage => '系统镜像';
+
+  @override
+  String get phoneSystemCheckImageMissing => '这个安装包没有带系统镜像。';
+
+  @override
+  String get phoneSystemCheckOptionOn => '已开启。';
+
+  @override
+  String get phoneSystemCheckOptionOff => '未开启。';
+
+  @override
+  String get phoneSystemCheckOptionUnknown => '读不到内核配置，无法确认。';
+
+  @override
+  String get phoneSystemCheckOffPids => '未开启：不能限制容器的进程数，不影响使用。';
+
+  @override
+  String get phoneSystemCheckOffNftables => '未开启：容器里用不了 nftables，防火墙规则请用 iptables-legacy。';
+
+  @override
+  String get phoneSystemCheckOffBridgeNetfilter => '未开启：Docker 默认网桥上的流量过滤不可用。';
+
+  @override
+  String get phoneSystemCheckOffAutofs => '未开启：systemd 的自动挂载不可用，镜像已屏蔽相关单元。';
+
+  @override
+  String get phoneSystemCheckOffCheckpoint => '未开启：CRIU 检查点和恢复不可用。';
+
+  @override
+  String get phoneSystemCheckPassedWarn => '可以开启。标黄的内核功能没有开启，相应的功能用不了。';
+
+  @override
+  String get phoneSystemCheckFailed => '有要求没满足，不能开启系统容器启动。';
+
+  @override
+  String get phoneLaunchSystem => '系统容器';
+
+  @override
+  String get phoneSystemLaunchFailed => '系统容器启动未成功';
+
+  @override
+  String get phoneSystemContainer => '系统容器';
+
+  @override
+  String get phoneSystemState => '状态';
+
+  @override
+  String get phoneSystemRunning => '运行中';
+
+  @override
+  String get phoneSystemBusy => '处理中…';
+
+  @override
+  String get phoneSystemNotInstalled => '未安装';
+
+  @override
+  String get phoneSystemImage => '镜像';
+
+  @override
+  String get phoneSystemStart => '启动容器';
+
+  @override
+  String get phoneSystemStartHint => 'systemd 会启动容器里的服务；App 关闭后容器继续运行。';
+
+  @override
+  String get phoneSystemStartInstallHint => '第一次启动要先解压系统镜像（约 680 MB），需要一两分钟。';
+
+  @override
+  String get phoneSystemStop => '停止容器';
+
+  @override
+  String get phoneSystemStopHint => '让 systemd 正常关机，一分钟内没关完就强制结束。';
+
+  @override
+  String get phoneSystemStopEngineFirst => '引擎正在容器里运行，请先停止引擎。';
+
+  @override
+  String get phoneSystemDelete => '删除系统容器';
+
+  @override
+  String get phoneSystemDeleteHint => '删除容器里装的软件和数据，含 Docker 存储；/root 和 DSH 的数据保留。';
+
+  @override
+  String get phoneSystemDeleteTitle => '删除系统容器？';
+
+  @override
+  String get phoneSystemDeleteBody =>
+      '容器里用 apt 装的软件、数据库、Docker 和 Podman 的镜像与数据，以及其他文件都会删除；/root 里的对话、工作区和设置保留。下次启动容器时会重新解压镜像。';
+
+  @override
+  String get phoneSystemActionFailed => '操作没有完成，详情见引擎日志。';
+
+  @override
+  String get phoneSystemStorage => 'Docker 存储';
+
+  @override
+  String phoneSystemStorageValue(String used, String ceiling) {
+    return '已用 $used，上限 $ceiling';
+  }
+
+  @override
+  String get phoneSystemStorageNone => '第一次启动容器时创建';
+
+  @override
+  String get phoneSystemGrow => '扩容 16 GB';
+
+  @override
+  String get phoneSystemGrowHint => '提高 Docker 和 Podman 存储的上限。只占实际写入的空间，删掉的会还给手机。';
+
+  @override
+  String get phoneSystemBackup => '备份系统容器';
+
+  @override
+  String get phoneSystemBackupHint => '先停止容器，再把系统、Docker 存储和 /root 打包到 Download/DSH-Go/backups。备份里有对话和 API 配置，请妥善保管。';
+
+  @override
+  String get phoneSystemBackupNeedsStorage => '备份和恢复需要先在设置里打开「访问手机文件」。';
+
+  @override
+  String get phoneSystemBackupDone => '已备份到 Download/DSH-Go/backups';
+
+  @override
+  String get phoneSystemRestore => '从备份恢复';
+
+  @override
+  String get phoneSystemRestoreHint => '用一个备份替换当前的系统容器';
+
+  @override
+  String get phoneSystemRestoreNone => 'Download/DSH-Go/backups 里还没有备份。';
+
+  @override
+  String get phoneSystemRestoreTitle => '恢复这个备份？';
+
+  @override
+  String get phoneSystemRestoreBody => '当前系统容器里的软件、数据库和 Docker 数据会被删除，换成备份里的内容；/root 里备份中也有的文件会被覆盖。';
+
+  @override
+  String get phoneSystemRestoreConfirm => '恢复';
+
+  @override
+  String get phoneSystemRestoreDone => '已恢复';
+
+  @override
+  String get phoneQuitAll => '退出 DSH Go（含容器）';
+
+  @override
+  String get phoneQuitAllHint => '停止引擎，让系统容器正常关机，然后退出 App。';
+
+  @override
   String get phoneActualLaunchMode => '当前运行方式';
 
   @override

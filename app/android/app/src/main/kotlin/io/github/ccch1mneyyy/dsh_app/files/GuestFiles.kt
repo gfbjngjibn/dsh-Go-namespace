@@ -2,6 +2,8 @@ package io.github.ccch1mneyyy.dsh_app.files
 
 import android.content.Context
 import io.github.ccch1mneyyy.dsh_app.runtime.PhoneStorage
+import io.github.ccch1mneyyy.dsh_app.runtime.RuntimeController
+import io.github.ccch1mneyyy.dsh_app.runtime.SystemContainer
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -15,6 +17,10 @@ import java.nio.file.LinkOption
  * hold *guest* targets (`/usr/lib/…`, and `--link2symlink` turns hard links
  * into links into `/root/.l2s`), so each one is followed in the guest world,
  * not by Android.
+ *
+ * With the engine in the system container, its own rootfs (`filesDir/system/rootfs`)
+ * is the guest root, and only the paths it shares with PRoot's (SystemContainer.SHARED:
+ * `/root`, the DSH layer) live in the PRoot rootfs.
  */
 object GuestFiles {
     private const val MAX_LINKS = 16
@@ -25,6 +31,7 @@ object GuestFiles {
     fun resolve(context: Context, path: String): File? {
         if (!path.startsWith("/")) return null
         val rootfs = rootfs(context)
+        val system = if (RuntimeController.get(context).engineInSystemContainer()) SystemContainer.layout(context).rootfs else null
         val pending = ArrayDeque(segments(path))
         val resolved = ArrayList<String>()
         var links = 0
@@ -35,7 +42,7 @@ object GuestFiles {
                 ".." -> { if (resolved.isNotEmpty()) resolved.removeAt(resolved.size - 1); continue }
             }
             resolved += segment
-            val host = hostOf(rootfs, resolved)
+            val host = hostOf(rootfs, system, resolved)
             val nio = host.toPath()
             if (!Files.isSymbolicLink(nio)) continue
             if (++links > MAX_LINKS) return null
@@ -52,17 +59,19 @@ object GuestFiles {
             }
             segments(target).reversed().forEach { pending.addFirst(it) }
         }
-        val file = hostOf(rootfs, resolved)
+        val file = hostOf(rootfs, system, resolved)
         return file.takeIf { Files.isRegularFile(it.toPath(), LinkOption.NOFOLLOW_LINKS) && it.canRead() }
     }
 
-    /** Host path of resolved guest [segments] (no symlinks left to follow in them). */
-    private fun hostOf(rootfs: File, segments: List<String>): File {
+    /** Host path of resolved guest [segments] (no symlinks left to follow in them); [system]: the system container's rootfs. */
+    internal fun hostOf(rootfs: File, system: File?, segments: List<String>): File {
         val guest = "/" + segments.joinToString("/")
         val phone = PhoneStorage.GUEST_PATH
         return when {
             guest == phone || guest.startsWith("$phone/") -> File(PhoneStorage.hostRoot() + guest.removePrefix(phone))
             guest == "/storage" || guest.startsWith("/storage/") -> File(guest)
+            system != null && SystemContainer.SHARED.none { guest == "/$it" || guest.startsWith("/$it/") } ->
+                File(system, guest.removePrefix("/"))
             else -> File(rootfs, guest.removePrefix("/"))
         }
     }

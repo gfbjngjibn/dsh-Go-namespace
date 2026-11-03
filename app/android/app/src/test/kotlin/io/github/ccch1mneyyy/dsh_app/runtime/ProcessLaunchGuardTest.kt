@@ -115,6 +115,10 @@ class ProcessLaunchGuardTest {
         // The explicit root channel's `su -c <fixed command>` (argv from RootCommands): also a
         // Java ProcessBuilder child, which closes inherited fds like DshProcess's launches.
         "app/android/app/src/main/kotlin/io/github/ccch1mneyyy/dsh_app/phone/background/RootProcess.kt",
+        // Root commands of the system container's check and of SystemContainer: fixed `su`
+        // probes and dshns calls (backup and restore stream through it too), Java ProcessBuilder
+        // children like DshProcess's.
+        "app/android/app/src/main/kotlin/io/github/ccch1mneyyy/dsh_app/runtime/RootShell.kt",
     )
     private val localHelper = "app/lib/remote/ssh/remote_shell.dart"
 

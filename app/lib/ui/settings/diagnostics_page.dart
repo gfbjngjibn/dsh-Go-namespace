@@ -167,6 +167,7 @@ class RuntimeLaunchFacts extends StatelessWidget {
     String method(String mode) => switch (mode) {
       'direct' => l10n.phoneLaunchDirect,
       'proot' => l10n.phoneLaunchCompatible,
+      'system' => l10n.phoneLaunchSystem,
       _ => mode,
     };
     // One child of the card: keep SheetGroup's 2dp between its rows.
@@ -192,6 +193,7 @@ class RuntimeLaunchFacts extends StatelessWidget {
               'notEnoughSpace' => l10n.phoneDirectNotEnoughSpace,
               'migrationFailed' => l10n.phoneDirectMigrationFailed,
               'directFailed' => l10n.phoneDirectLaunchFailed,
+              'systemFailed' => l10n.phoneSystemLaunchFailed,
               'safeRecovery' => l10n.phoneSafeMode,
               _ => reason,
             },

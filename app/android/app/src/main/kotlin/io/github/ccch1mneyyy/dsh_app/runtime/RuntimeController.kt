@@ -14,6 +14,7 @@ import io.github.ccch1mneyyy.dsh_app.phone.PhoneControl
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import kotlin.concurrent.thread
 import java.util.concurrent.Executors
 
 /**
@@ -54,6 +55,12 @@ class RuntimeController private constructor(private val app: Context) : DshProce
     @Volatile private var lastLaunch: LaunchDiagnostics? = null
     /** The start in progress is turning PRoot's fake hard links into real files (see [L2sMigration]). */
     @Volatile private var tidyingFiles = false
+    /** The system image this APK carries (null: none for this ABI). */
+    private val systemImage: SystemContainer.Image? by lazy { SystemContainer.bundled(app) }
+    /** A system container install, start, stop or delete is under way. */
+    @Volatile private var systemBusy = false
+    /** One container start, stop or delete at a time (engine launches and 引擎页's controls). */
+    private val systemLock = Any()
 
     @Volatile var phase: Phase = Phase.NOT_INSTALLED
         private set
@@ -106,6 +113,8 @@ class RuntimeController private constructor(private val app: Context) : DshProce
     val safeRun: Boolean get() = runSafe
 
     init {
+        // The namespace launch (proot rootfs under ns-launch.sh) is gone; forget its switch.
+        prefs.edit().remove("namespaceEngine").remove("namespaceEngineFailedRuntime").apply()
         phase = try {
             if (installer.isCurrent()) Phase.INSTALLED else Phase.NOT_INSTALLED
         } catch (e: Exception) {
@@ -142,6 +151,15 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         "directEngineAvailable" to directEngineAvailable(),
         "directEngineActive" to (process?.executionMode == "direct"),
         "directEngineFallbackReason" to lastLaunch?.fallbackReason,
+        "systemEngineEnabled" to systemEngine().requested,
+        "systemEngineFailed" to systemEngine().failed,
+        "systemEngineActive" to (process?.executionMode == "system"),
+        "systemImage" to systemImage?.version,
+        "systemImageInstalled" to SystemContainer.installedVersion(app),
+        "systemContainerRunning" to SystemContainer.running(app),
+        "systemContainerBusy" to systemBusy,
+        "systemStorage" to SystemContainer.storageUse(app)?.let { (ceiling, used) -> mapOf("ceiling" to ceiling, "used" to used) },
+        "systemBackups" to systemBackups(),
         "currentExecutionMode" to process?.executionMode,
         "launchSelectedMode" to lastLaunch?.selectedMode,
         "launchSpawned" to (lastLaunch?.spawned == true),
@@ -168,6 +186,136 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         check(!enabled || directEngineAvailable()) { "this bundled runtime does not support direct launch" }
         prefs.edit().putBoolean(K_DIRECT_ENGINE, enabled).remove(K_DIRECT_FAILED).apply()
         emitStatus()
+    }
+
+    private fun systemEngine() = SystemContainer.Preference(
+        saved = prefs.getBoolean(K_SYSTEM_ENGINE, false),
+        failedRuntime = prefs.getString(K_SYSTEM_FAILED, null),
+        runtime = runCatching { manifest.runtimeVersion }.getOrNull(),
+    )
+
+    /** The engine in the system container, off by default; like Direct, an explicit choice forgets an earlier failure. */
+    @Synchronized fun setSystemEngine(enabled: Boolean) {
+        check(process == null && phase !in setOf(Phase.STARTING, Phase.RUNNING, Phase.STOPPING, Phase.INSTALLING) && !resetting) { "stop the engine before changing its launch method" }
+        check(!enabled || systemImage != null) { "this build carries no system container" }
+        prefs.edit().putBoolean(K_SYSTEM_ENGINE, enabled).remove(K_SYSTEM_FAILED).apply()
+        emitStatus()
+    }
+
+    /** The system container launch failed with this runtime: the next method from now on, until the user turns it on again. */
+    private fun systemLaunchFailed(why: String) {
+        prefs.edit().putString(K_SYSTEM_FAILED, manifest.runtimeVersion).apply()
+        log("[dsh-app] system container launch failed ($why); starting again with the next launch method", "system")
+        restartNow("with the next launch method")
+    }
+
+    /**
+     * Unpacks the system image on first use and starts the container, or restarts it onto
+     * this runtime's binds. Blocking: the worker, or a container action's thread.
+     */
+    private fun prepareSystemContainer(storage: List<String>) {
+        val image = systemImage ?: error("this build carries no system container")
+        systemBusy = true
+        emitStatus()
+        try {
+            if (SystemContainer.installedVersion(app) == null) {
+                log("[dsh-app] unpacking system container image ${image.version}", "system")
+                var shown = -1L
+                SystemContainer.install(app, image, { done, total ->
+                    val tenth = if (total > 0) done * 10 / total else -1
+                    if (tenth != shown) {
+                        shown = tenth
+                        log("[dsh-app] system container image: ${tenth * 10}%", "system")
+                    }
+                }) { log(it, "system") }
+            }
+            val args = SystemContainer.startArgs(SystemContainer.layout(app), installer.rootfs, storage, android.os.Process.myUid(), android.system.Os.getgid(),
+                SystemContainer.supplementaryGroups())
+            SystemContainer.start(app, args, manifest.runtimeVersion) { log(it, "system") }
+        } finally {
+            systemBusy = false
+            emitStatus()
+        }
+    }
+
+    /** Whether the running engine's guest is the system container (GuestFiles maps its paths there). */
+    fun engineInSystemContainer(): Boolean = process?.system == true
+
+    /** Backups on the phone's storage, when the app may read it; newest first. */
+    private fun systemBackups(): List<Map<String, Any>>? =
+        if (systemImage == null || !PhoneStorage.isGranted(app)) null
+        else runCatching { SystemContainer.backups().map { mapOf("name" to it.name, "bytes" to it.bytes, "modified" to it.modified) } }.getOrNull()
+
+    /**
+     * 引擎页's system container controls: "start", "stop", "delete", "grow" (the storage's
+     * ceiling), "backup" or "restore" ([name]: a backup). All but start and grow wait for an
+     * engine that runs in it to be stopped first; backup stops the container, restore replaces
+     * it. [onDone] runs on the main thread.
+     */
+    fun systemContainer(action: String, name: String? = null, onDone: (Throwable?) -> Unit) {
+        thread(name = "dsh-system", isDaemon = true) {
+            val result = runCatching {
+                synchronized(systemLock) {
+                    if (action == "start") {
+                        check(installer.isCurrent()) { "runtime not installed" }
+                        val storage = pendingPhoneStorage && PhoneStorage.isGranted(app)
+                        prepareSystemContainer(if (storage) PhoneStorage.binds() else emptyList())
+                        return@synchronized
+                    }
+                    check(action == "grow" || process?.system != true) { "stop the engine first: it runs in the system container" }
+                    systemBusy = true
+                    emitStatus()
+                    try {
+                        val log: (String) -> Unit = { log(it, "system") }
+                        val uid = android.os.Process.myUid()
+                        val gid = android.system.Os.getgid()
+                        when (action) {
+                            "stop" -> check(SystemContainer.stop(app, log)) { "system container did not stop" }
+                            "delete" -> SystemContainer.remove(app, log)
+                            "grow" -> SystemContainer.grow(app, log)
+                            "backup" -> {
+                                check(PhoneStorage.isGranted(app)) { "backups need 「访问手机文件」" }
+                                if (SystemContainer.running(app)) check(SystemContainer.stop(app, log)) { "system container did not stop" }
+                                SystemContainer.backup(app, installer.rootfs, uid, gid, SystemContainer.supplementaryGroups(), log)
+                            }
+                            "restore" -> {
+                                check(PhoneStorage.isGranted(app)) { "backups need 「访问手机文件」" }
+                                check(installer.isCurrent()) { "runtime not installed" }
+                                val image = systemImage ?: error("this build carries no system container")
+                                SystemContainer.restore(app, image, name ?: error("no backup named"), installer.rootfs, uid, gid,
+                                    SystemContainer.supplementaryGroups(), log)
+                            }
+                            else -> error("unknown system container action $action")
+                        }
+                    } finally {
+                        systemBusy = false
+                        emitStatus()
+                    }
+                }
+            }.exceptionOrNull()
+            result?.let { log("[dsh-app] system container $action failed: ${it.message}", "system") }
+            main.post { onDone(result) }
+        }
+    }
+
+    /**
+     * 「退出 DSH Go（含容器）」's work: stop the engine, wait for it, shut the system container
+     * down (systemd's own shutdown, cut short after a minute). [onDone] gets whether the
+     * container is down; the caller then ends the app.
+     */
+    fun quit(onDone: (Boolean) -> Unit) {
+        runCatching { stop() }
+        thread(name = "dsh-quit", isDaemon = true) {
+            val deadline = SystemClock.elapsedRealtime() + 20_000
+            while ((process != null || phase == Phase.STARTING || phase == Phase.STOPPING) && SystemClock.elapsedRealtime() < deadline) {
+                Thread.sleep(200)
+            }
+            val down = synchronized(systemLock) {
+                !SystemContainer.running(app) || SystemContainer.stop(app) { log(it, "system") }
+            }
+            runtimeLogs.flush()
+            main.post { onDone(down) }
+        }
     }
 
     /** While a process is up: its mode; otherwise the mode the next start will use. */
@@ -343,14 +491,27 @@ class RuntimeController private constructor(private val app: Context) : DshProce
                     PhoneControl.get(app).onEngineStopped()
                     return@execute
                 }
+                val system = systemEngine()
+                if (system.requested && !safe) {
+                    val ready = runCatching {
+                        synchronized(systemLock) { prepareSystemContainer(if (storage) PhoneStorage.binds() else emptyList()) }
+                    }
+                    // A stop while the image unpacked or the container booted is finished by the stop's own queued task.
+                    if (stopGen >= gen || gen != runGen || ready.isFailure) {
+                        PhoneControl.get(app).onEngineStopped()
+                        if (stopGen < gen && gen == runGen) systemLaunchFailed(ready.exceptionOrNull()?.message ?: "container start")
+                        return@execute
+                    }
+                }
                 val p = DshProcess(app, manifest, installer.rootfs, this)
                 launched = p
                 lastLaunch = p.launchDiagnostics
                 process = p
                 timeline.spawned()
                 val direct = directEngine()
-                p.start(env, if (storage) PhoneStorage.binds() else emptyList(), safe, phone, direct.requested, direct.failed) { actualDirect ->
-                    GuestSetup.writeAgentsMd(installer.rootfs, storage, phone, pendingVisualReplies, actualDirect)
+                p.start(env, if (storage) PhoneStorage.binds() else emptyList(), safe, phone, direct.requested, direct.failed,
+                    system.requested, system.saved && system.failed) { actualDirect ->
+                    GuestSetup.writeAgentsMd(installer.rootfs, storage, phone, pendingVisualReplies, actualDirect, p.system)
                 }
                 if (phone) PhoneControl.get(app).launched(p.phoneMounted)
             } catch (e: Throwable) {
@@ -362,6 +523,11 @@ class RuntimeController private constructor(private val app: Context) : DshProce
                 process = null
                 PhoneControl.get(app).onEngineStopped()
                 if (stopGen >= gen) return@execute
+                // su missing or refused to run at all: same as a root launch that failed later.
+                if (launched?.system == true) {
+                    systemLaunchFailed(e.message ?: e.javaClass.simpleName)
+                    return@execute
+                }
                 error = "start failed: ${e.message}"
                 log("[dsh-app] $error", "system")
                 setPhase(Phase.ERROR)
@@ -432,6 +598,10 @@ class RuntimeController private constructor(private val app: Context) : DshProce
                 process?.let { p ->
                     p.stop()
                     check(p.awaitExit(15_000)) { "runtime stop incomplete; retry reset after cleanup" }
+                }
+                // Its /root and DSH layer are binds into the runtime being deleted.
+                synchronized(systemLock) {
+                    if (SystemContainer.running(app)) check(SystemContainer.stop(app) { log(it, "system") }) { "system container did not stop" }
                 }
                 lastLaunch = null
                 try {
@@ -769,7 +939,12 @@ class RuntimeController private constructor(private val app: Context) : DshProce
                 return
             }
             val tail = synchronized(runTail) { runTail.toList() }
-            var f = CrashClassifier.classify(code, readyAt, SystemClock.elapsedRealtime(), System.currentTimeMillis(), tail, runSafe, source.direct)
+            var f = CrashClassifier.classify(code, readyAt, SystemClock.elapsedRealtime(), System.currentTimeMillis(), tail, runSafe,
+                source.direct, source.system)
+            if (SafePolicy.directLaunchFailed(f, source.system)) {
+                systemLaunchFailed(f.summary ?: "exit $code")
+                return
+            }
             if (SafePolicy.directLaunchFailed(f, source.direct)) {
                 // Direct can't launch on this device: PRoot from now on with this runtime, no failure card,
                 // no strike. A new runtime, or the user turning Direct on again, gives it another try.
@@ -865,6 +1040,9 @@ class RuntimeController private constructor(private val app: Context) : DshProce
         private const val K_DIRECT_ENGINE = "directEngine"
         /** Runtime version Direct failed to launch with (see [SafePolicy.directLaunchFailed]). */
         private const val K_DIRECT_FAILED = "directEngineFailedRuntime"
+        private const val K_SYSTEM_ENGINE = "systemEngine"
+        /** Runtime version the system container launch failed with; the next method until it changes or the user retries. */
+        private const val K_SYSTEM_FAILED = "systemEngineFailedRuntime"
         private const val MAIN_FAILURE_LOG = "failure-normal.log"
         private const val LATEST_FAILURE_LOG = "failure-latest.log"
 

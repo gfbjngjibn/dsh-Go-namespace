@@ -32,6 +32,14 @@ class _Bridge extends RuntimeBridge {
     if (fail) throw StateError('native rejected transition');
     if (pending case final future?) await future.future;
   }
+
+  final systemChanges = <bool>[];
+  @override
+  Future<void> setSystemEngine(bool enabled) async => systemChanges.add(enabled);
+
+  List<SystemCheckItem> systemCheck = const [SystemCheckItem(key: 'root', ok: true)];
+  @override
+  Future<List<SystemCheckItem>> checkSystemContainer() async => systemCheck;
 }
 
 void main() {
@@ -66,7 +74,10 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  SettingsSwitchTile tile(WidgetTester tester) => tester.widget<SettingsSwitchTile>(find.byType(SettingsSwitchTile));
+  // Direct comes first; the system container switch (builds with an image) follows it.
+  SettingsSwitchTile tile(WidgetTester tester) => tester.widget<SettingsSwitchTile>(find.byType(SettingsSwitchTile).first);
+  SettingsSwitchTile systemTile(WidgetTester tester) =>
+      tester.widget<SettingsSwitchTile>(find.byType(SettingsSwitchTile).last);
 
   testWidgets('failed direct launch offers original compatible setter, once', (tester) async {
     final bridge = _Bridge()..pending = Completer<void>();
@@ -188,7 +199,7 @@ void main() {
     expect(tile(tester).value, isFalse);
     expect(tile(tester).subtitle, l10n.phoneDirectFailedHint);
     expect(find.text(l10n.phoneReturnCompatible), findsNothing);
-    await tester.tap(find.byType(Switch));
+    await tester.tap(find.byType(Switch).first);
     await tester.pumpAndSettle();
     expect(bridge.changes, [true]);
     // Native now reports it on; the last launch's reason no longer explains the switch.
@@ -232,7 +243,7 @@ void main() {
     await show(tester, runtime, bridge);
     expect(tile(tester).value, isFalse);
     expect(tile(tester).onChanged, isNotNull);
-    await tester.tap(find.byType(Switch));
+    await tester.tap(find.byType(Switch).first);
     await tester.pump();
     expect(bridge.changes, [true]);
     expect(tile(tester).onChanged, isNull);
@@ -260,7 +271,7 @@ void main() {
     runtime.update(const RuntimeStatus(phase: RuntimePhase.installed, directEngineEnabled: true));
     await tester.pumpAndSettle();
     expect(tile(tester).onChanged, isNotNull);
-    await tester.tap(find.byType(Switch));
+    await tester.tap(find.byType(Switch).first);
     await tester.pumpAndSettle();
     expect(bridge.changes, [false]);
   });
@@ -271,7 +282,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     final bridge = _Bridge()..fail = true;
     await show(tester, _Runtime(stopped), bridge);
-    await tester.tap(find.byType(Switch));
+    await tester.tap(find.byType(Switch).first);
     await tester.pumpAndSettle();
     expect(tile(tester).value, isFalse);
     expect(find.text(lookupL10n(AppLocale.zhCN).phoneDirectChangeFailed), findsOneWidget);
@@ -289,15 +300,86 @@ void main() {
             safeState: SafeModeState.on,
             directEngineAvailable: true,
             directEngineEnabled: true,
+            systemImage: 's1-ubuntu-noble-20261018_1335-abc',
           ),
         ),
         _Bridge(),
         locale: locale,
         scale: 2,
       );
-      expect(find.text(lookupL10n(locale).phoneDirectSafeHint), findsOneWidget);
+      // Both launch switches (Direct, system container) explain that safe mode stays on proot.
+      expect(find.text(lookupL10n(locale).phoneDirectSafeHint), findsNWidgets(2));
       expect(tile(tester).value, isTrue);
       expect(tester.takeException(), isNull);
     });
   }
+
+  const image = 's1-ubuntu-noble-20261018_1335-abc';
+
+  testWidgets('system container switch only changes while stopped and explains a failed launch', (tester) async {
+    final l10n = lookupL10n(AppLocale.zhCN);
+    final runtime = _Runtime(const RuntimeStatus(phase: RuntimePhase.running, systemImage: image));
+    final bridge = _Bridge();
+    await show(tester, runtime, bridge);
+    expect(systemTile(tester).onChanged, isNull);
+    runtime.update(const RuntimeStatus(phase: RuntimePhase.installed, systemImage: image, systemEngineFailed: true));
+    await tester.pumpAndSettle();
+    expect(systemTile(tester).subtitle, l10n.phoneSystemFailedHint);
+    expect(bridge.changes, isEmpty);
+  });
+
+  testWidgets('a failed requirement, unlike a warning, keeps the system container off', (tester) async {
+    final l10n = lookupL10n(AppLocale.zhCN);
+    final bridge = _Bridge()
+      ..systemCheck = const [
+        SystemCheckItem(key: 'root', ok: true),
+        SystemCheckItem(key: 'noNewPrivs', ok: false, detail: 'unsupported'),
+        SystemCheckItem(key: 'trial', ok: false, detail: 'skipped'),
+      ];
+    await show(tester, _Runtime(const RuntimeStatus(phase: RuntimePhase.installed, systemImage: image)), bridge);
+    await tester.tap(find.byType(Switch).last);
+    await tester.pumpAndSettle();
+    expect(find.text(l10n.phoneSystemCheckNoNewPrivsMissing), findsOneWidget);
+    expect(find.text(l10n.phoneSystemCheckFailed), findsOneWidget);
+    expect(find.byKey(const Key('system-check-enable')), findsNothing);
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+    expect(bridge.systemChanges, isEmpty);
+
+    bridge.systemCheck = const [SystemCheckItem(key: 'root', ok: true), SystemCheckItem(key: 'trial', ok: true)];
+    await tester.tap(find.byType(Switch).last);
+    await tester.pumpAndSettle();
+    expect(find.text(l10n.phoneSystemCheckTrialOk), findsOneWidget);
+    await tester.tap(find.byKey(const Key('system-check-enable')));
+    await tester.pumpAndSettle();
+    expect(bridge.systemChanges, [true]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('system container switch needs an image and turns on through a check whose misses are warnings', (
+    tester,
+  ) async {
+    final l10n = lookupL10n(AppLocale.zhCN);
+    final runtime = _Runtime(const RuntimeStatus(phase: RuntimePhase.installed));
+    final bridge = _Bridge()
+      ..systemCheck = const [
+        SystemCheckItem(key: 'root', ok: true),
+        SystemCheckItem(key: 'cgroup2', ok: true),
+        SystemCheckItem(key: 'kconfig:NF_TABLES', ok: false, detail: 'off', warn: true),
+      ];
+    await show(tester, runtime, bridge);
+    expect(find.text(l10n.phoneSystemEngine), findsNothing);
+
+    runtime.update(const RuntimeStatus(phase: RuntimePhase.installed, systemImage: image));
+    await tester.pumpAndSettle();
+    expect(find.text(l10n.phoneSystemEngine), findsOneWidget);
+    await tester.tap(find.byType(Switch).last);
+    await tester.pumpAndSettle();
+    expect(find.text(l10n.phoneSystemCheckOffNftables), findsOneWidget);
+    expect(find.text(l10n.phoneSystemCheckPassedWarn), findsOneWidget);
+    await tester.tap(find.byKey(const Key('system-check-enable')));
+    await tester.pumpAndSettle();
+    expect(bridge.systemChanges, [true]);
+    expect(tester.takeException(), isNull);
+  });
 }

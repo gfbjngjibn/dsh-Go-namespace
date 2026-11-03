@@ -37,6 +37,19 @@ class GuestDnsWriteTest {
         assertFalse(File(root, "etc/.resolv.conf.dsh-tmp").exists())
     }
 
+    @Test fun everyUserCanReadItEvenWhenItWasOwnerOnly() {
+        // The system container's own users (apt's _apt) resolve through this file.
+        val root = temporary.newFolder()
+        val file = existing(root, expected)
+        Files.setPosixFilePermissions(file.toPath(), java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
+        GuestSetup.writeResolvConf(root, servers, ::replace)
+        assertTrue(Files.getPosixFilePermissions(file.toPath()).contains(java.nio.file.attribute.PosixFilePermission.OTHERS_READ))
+        val fresh = temporary.newFolder()
+        GuestSetup.writeResolvConf(fresh, servers, ::replace)
+        assertTrue(Files.getPosixFilePermissions(File(fresh, "etc/resolv.conf").toPath())
+            .contains(java.nio.file.attribute.PosixFilePermission.OTHERS_READ))
+    }
+
     @Test fun matchingFileDoesNotWriteOrRename() {
         val root = temporary.newFolder()
         val file = existing(root, expected)

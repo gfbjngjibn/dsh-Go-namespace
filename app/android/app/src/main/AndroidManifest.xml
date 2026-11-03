@@ -221,6 +221,14 @@
             <meta-data android:name="android.service.quicksettings.TOGGLEABLE_TILE" android:value="false" />
         </service>
 
+        <!-- 「退出 DSH Go（含容器）」: a confirm dialog over whatever is on screen (runtime/QuitActivity.kt). -->
+        <activity
+            android:name=".runtime.QuitActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- Keeps the local DSH process alive while the app is in the background. -->
         <service
             android:name=".runtime.DshService"

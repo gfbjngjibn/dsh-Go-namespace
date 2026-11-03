@@ -166,6 +166,15 @@ class RuntimeStatus {
     this.directEngineAvailable = false,
     this.directEngineActive = false,
     this.directEngineFallbackReason,
+    this.systemEngineEnabled = false,
+    this.systemEngineFailed = false,
+    this.systemEngineActive = false,
+    this.systemImage,
+    this.systemImageInstalled,
+    this.systemContainerRunning = false,
+    this.systemContainerBusy = false,
+    this.systemStorage,
+    this.systemBackups,
     this.currentExecutionMode,
     this.launchSelectedMode,
     this.launchSpawned = false,
@@ -224,6 +233,25 @@ class RuntimeStatus {
   final bool directEngineActive;
   final String? directEngineFallbackReason;
 
+  /// The engine in the system container (native SystemContainer): saved choice, failed with this runtime, running.
+  final bool systemEngineEnabled;
+  final bool systemEngineFailed;
+  final bool systemEngineActive;
+
+  /// Version of the system image this build carries (null: none for this ABI), and of the unpacked one.
+  final String? systemImage;
+  final String? systemImageInstalled;
+
+  /// The container runs (a daemon, independent of the engine); a start, stop or delete is under way.
+  final bool systemContainerRunning;
+  final bool systemContainerBusy;
+
+  /// The Docker/Podman storage image: its ceiling and what it takes on the phone (null before the first start).
+  final SystemStorage? systemStorage;
+
+  /// Backups in Download/DSH-Go/backups, newest first; null without 「访问手机文件」.
+  final List<SystemBackup>? systemBackups;
+
   /// Native process observation, never inferred from the saved direct preference.
   final String? currentExecutionMode;
 
@@ -241,6 +269,17 @@ class RuntimeStatus {
     'directEngineAvailable': directEngineAvailable,
     'directEngineActive': directEngineActive,
     'directEngineFallbackReason': directEngineFallbackReason,
+    'systemEngineEnabled': systemEngineEnabled,
+    'systemEngineFailed': systemEngineFailed,
+    'systemEngineActive': systemEngineActive,
+    'systemImage': systemImage,
+    'systemImageInstalled': systemImageInstalled,
+    'systemContainerRunning': systemContainerRunning,
+    'systemContainerBusy': systemContainerBusy,
+    'systemStorage': systemStorage == null ? null : {'ceiling': systemStorage!.ceiling, 'used': systemStorage!.used},
+    'systemBackups': systemBackups == null
+        ? null
+        : [for (final b in systemBackups!) {'name': b.name, 'bytes': b.bytes, 'modified': b.modified}],
     'currentExecutionMode': currentExecutionMode,
     'launchSelectedMode': launchSelectedMode,
     'launchSpawned': launchSpawned,
@@ -293,6 +332,31 @@ class RuntimeStatus {
     directEngineAvailable: map['directEngineAvailable'] == true,
     directEngineActive: map['directEngineActive'] == true,
     directEngineFallbackReason: map['directEngineFallbackReason'] as String?,
+    systemEngineEnabled: map['systemEngineEnabled'] == true,
+    systemEngineFailed: map['systemEngineFailed'] == true,
+    systemEngineActive: map['systemEngineActive'] == true,
+    systemImage: map['systemImage'] as String?,
+    systemImageInstalled: map['systemImageInstalled'] as String?,
+    systemContainerRunning: map['systemContainerRunning'] == true,
+    systemContainerBusy: map['systemContainerBusy'] == true,
+    systemStorage: switch (map['systemStorage']) {
+      final Map<Object?, Object?> m => SystemStorage(
+        ceiling: (m['ceiling'] as num?)?.toInt() ?? 0,
+        used: (m['used'] as num?)?.toInt() ?? 0,
+      ),
+      _ => null,
+    },
+    systemBackups: switch (map['systemBackups']) {
+      final List<Object?> list => [
+        for (final m in list.whereType<Map<Object?, Object?>>())
+          SystemBackup(
+            name: m['name'] as String? ?? '',
+            bytes: (m['bytes'] as num?)?.toInt() ?? 0,
+            modified: (m['modified'] as num?)?.toInt() ?? 0,
+          ),
+      ],
+      _ => null,
+    },
     currentExecutionMode: map['currentExecutionMode'] as String?,
     launchSelectedMode: map['launchSelectedMode'] as String?,
     launchSpawned: map['launchSpawned'] == true,
@@ -500,6 +564,42 @@ class ManagedSkillInstallResponse {
   final String? reason;
 }
 
+/// The system container's Docker/Podman storage, in bytes.
+class SystemStorage {
+  const SystemStorage({required this.ceiling, required this.used});
+
+  final int ceiling;
+  final int used;
+}
+
+/// One backup of the system container; [modified] in epoch milliseconds.
+class SystemBackup {
+  const SystemBackup({required this.name, required this.bytes, required this.modified});
+
+  final String name;
+  final int bytes;
+  final int modified;
+}
+
+/// One system container requirement (native SystemCheck). [detail] is a stable
+/// code, or the launcher's own failure line for the trial. A [warn] item that is
+/// not ok costs a feature, not the launch.
+class SystemCheckItem {
+  const SystemCheckItem({required this.key, required this.ok, this.detail, this.warn = false});
+
+  factory SystemCheckItem.fromMap(Map<Object?, Object?> map) => SystemCheckItem(
+    key: map['key'] as String? ?? '',
+    ok: map['ok'] == true,
+    detail: map['detail'] as String?,
+    warn: map['warn'] == true,
+  );
+
+  final String key;
+  final bool ok;
+  final String? detail;
+  final bool warn;
+}
+
 /// Dart side of the `dsh/runtime` platform channels implemented in Kotlin.
 class RuntimeBridge {
   RuntimeBridge({MethodChannel? methods, EventChannel? events})
@@ -608,6 +708,25 @@ class RuntimeBridge {
 
   /// Takes effect on the next start; native code rejects changes while active.
   Future<void> setDirectEngine(bool enabled) => _methods.invokeMethod<void>('setDirectEngine', {'enabled': enabled});
+
+  /// The system container's requirements (seconds): root, kernel namespaces, KernelSU's
+  /// no-new-privs and a trial su it must refuse, cgroup2, the launcher, an image and (as
+  /// warnings) kernel options it does without.
+  Future<List<SystemCheckItem>> checkSystemContainer() async {
+    final items = await _methods.invokeListMethod<Map<Object?, Object?>>('checkSystemContainer') ?? const [];
+    return [for (final item in items) SystemCheckItem.fromMap(item)];
+  }
+
+  /// The engine in the system container; like Direct, only while the engine is stopped.
+  Future<void> setSystemEngine(bool enabled) => _methods.invokeMethod<void>('setSystemEngine', {'enabled': enabled});
+
+  /// `start`, `stop`, `delete`, `grow` (the storage's ceiling), `backup` or `restore` ([name]: a backup) the
+  /// system container: seconds to minutes (a first start unpacks the image, a backup copies everything).
+  Future<void> systemContainer(String action, {String? name}) =>
+      _methods.invokeMethod<void>('systemContainer', {'action': action, 'name': ?name});
+
+  /// 「退出 DSH Go（含容器）」: the native confirm dialog, which then ends the app.
+  Future<void> quit() => _methods.invokeMethod<void>('quit');
 
   /// Output around the last failure, tokens masked.
   Future<List<String>> failureLog() async => (await _methods.invokeListMethod<String>('failureLog')) ?? const [];

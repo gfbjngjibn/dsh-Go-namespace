@@ -22,4 +22,14 @@ class CrashClassifierTest {
         assertFalse(failure.summary!!.contains("private-value"))
         assertTrue(failure.summary!!.contains("token="))
     }
+
+    @Test fun aSystemContainerLauncherFailureIsALaunchFailureOnlyForThatLaunch() {
+        val tail = listOf("[dsh-app] launch method: system", "[dshns] container is not running")
+        val failed = CrashClassifier.classify(125, null, 1L, 1L, tail, false, systemEngine = true)
+        assertTrue(SafePolicy.directLaunchFailed(failed, true))
+        assertNotEquals(FailureKind.LAUNCH_FAILED, CrashClassifier.classify(125, null, 1L, 1L, tail, false).kind)
+        // The launcher's own PID note is not a failure.
+        val note = CrashClassifier.classify(1, null, 1L, 1L, listOf("[dshns] exec pid=42"), false, systemEngine = true)
+        assertNotEquals(FailureKind.LAUNCH_FAILED, note.kind)
+    }
 }

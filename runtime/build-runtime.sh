@@ -22,6 +22,13 @@
 #   runtime/out/<abi>/build-report.json                  (ELF audit, pruned files, warnings)
 #   runtime/out/manifest.json                            (index of all built ABIs)
 #
+# System container (runtime/container), for an ABI with a pinned image; also built alone with
+#   runtime/build-runtime.sh --system-only arm64-v8a
+#   runtime/out/<abi>/assets/runtime/system-<abi>.tar.xz  (prebuilt Ubuntu + $SYSTEM_EXTRA + overlay)
+#   runtime/out/<abi>/assets/runtime/system.json          (image version, hashes, provenance)
+#   runtime/out/<abi>/jniLibs/<abi>/libdshns.so           (the launcher, needs the Android NDK)
+#   runtime/out/<abi>/system-report.json
+#
 # Idempotent: downloads are cached in runtime/.cache and verified on every run; the npm
 # trees are pinned by runtime/locks/dsh-<version>/package-lock.json and
 # runtime/locks/pnpm-<version>/package-lock.json (created on the first run, reused with
@@ -44,10 +51,17 @@ PNPM_VERSION="${PNPM_VERSION:-11.28.5}"
 # dist.integrity of pnpm-$PNPM_VERSION.tgz, identical on registry.npmjs.org and npmmirror
 PNPM_INTEGRITY="${PNPM_INTEGRITY:-sha512-SEVj0wtMKtJ8tIqpT/KzAtvOvI/2vyiBbCWJiG4UbOf3bzVPO8GkOOb16XaMMCqgpvet2CMpA81M+BQmy8FNng==}"
 UBUNTU_VERSION="${UBUNTU_VERSION:-24.04.5}"
-PROOT_VERSION="5.1.107.98"
+PROOT_VERSION="5.1.107.102"
 TALLOC_VERSION="2.5.0"
 SHMEM_VERSION="0.7"
 UBUNTU_EXTRA="${UBUNTU_EXTRA:-tzdata ca-certificates git}"   # extra noble debs (+ dependency closure)
+# System container image: images.linuxcontainers.org rebuilds it daily and deletes older serials,
+# so the verified copy in runtime/.cache/lxc is what this pin really points at; keep it.
+LXC_RELEASE="${LXC_RELEASE:-noble}"
+LXC_SERIAL="${LXC_SERIAL:-20261018_1335}"
+SYSTEM_REVISION="${SYSTEM_REVISION:-s1}"
+SYSTEM_EXTRA="${SYSTEM_EXTRA:-git}"   # extra noble debs for the system image (+ dependency closure)
+NDK_VERSION="${NDK_VERSION:-28.2.13676358}"   # builds dshns; the NDK Flutter's Gradle plugin uses
 PYTHON_VERSION="${PYTHON_VERSION:-3.12.15}"
 PBS_RELEASE="${PBS_RELEASE:-20261021}"    # astral-sh/python-build-standalone release tag
 COMPRESS="${COMPRESS:-xz}"          # xz | gz
@@ -64,6 +78,7 @@ UBUNTU_ARCHIVE_AMD64="https://mirrors.tuna.tsinghua.edu.cn/ubuntu"        # InRe
 UBUNTU_ARCHIVE_ARM64="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
 PBS_OFFICIAL="https://github.com/astral-sh/python-build-standalone/releases/download"
 PBS_MIRROR="https://registry.npmmirror.com/-/binary/python-build-standalone"
+LXC_MIRROR="https://images.linuxcontainers.org/images/ubuntu"
 
 # sha256 pins, cross-checked against cdimage.ubuntu.com / nodejs.org / the Termux Packages
 # index. The mirror's SHA256SUMS / SHASUMS256.txt are verified as well.
@@ -82,6 +97,8 @@ declare -A PIN=(
   [cpython-3.12.15+20261021-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz]=6d7521138fd33afddc1ccd08abb007d9a2829e38117c2576f9efdc0ec73ce772
   # GPL-2.0 source of the proot binary (same archive Termux's build recipe pins); used for COPYING.
   [proot-v5.1.107.98.zip]=9de61bddd6f5016d065e2755b72ff4747290e5f992562f031785b107b51d02ba
+  # rootfs.tar.xz of images.linuxcontainers.org ubuntu/<release>/<arch>/default/<serial>
+  [lxc-ubuntu-noble-arm64-20261018_1335.tar.xz]=e87ce7681d6a3ef67f1eab3d63720c0c0174c330f23755757ef5f8d2addad976
 )
 
 log() { printf '\033[1;34m[runtime %s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
@@ -160,10 +177,16 @@ termux_deb() {  # $1 = package, $2 = version, $3 = termux arch; echoes path
 # -> each .deb hash. The resolved set is pinned in runtime/locks/ubuntu-noble-<arch>.json
 # (re-resolve with UPDATE_DEB_LOCK=1).
 ubuntu_extra_debs() {  # $1 = ubuntu arch, $2 = verified base tarball; echoes deb paths, one per line
-  local arch="$1" base="$2" lock="$LOCKS/ubuntu-noble-$1.json" mirror
+  ubuntu_debs "$1" "$2" "$UBUNTU_EXTRA" "$2" "$LOCKS/ubuntu-noble-$1.json"
+}
+
+# $1 = ubuntu arch, $2 = verified Ubuntu Base tarball (its archive keyring), $3 = wanted packages,
+# $4 = tarball whose dpkg status the closure starts from, $5 = lock file; echoes deb paths.
+ubuntu_debs() {
+  local arch="$1" base="$2" packages="$3" status_base="$4" lock="$5" mirror
   [[ "$arch" == amd64 ]] && mirror="$UBUNTU_ARCHIVE_AMD64" || mirror="$UBUNTU_ARCHIVE_ARM64"
   if [[ ! -f "$lock" || "${UPDATE_DEB_LOCK:-0}" == 1 ]] || \
-     ! python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))["want"] != sys.argv[2].split())' "$lock" "$UBUNTU_EXTRA"; then
+     ! python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1]))["want"] != sys.argv[2].split())' "$lock" "$packages"; then
     command -v gpgv >/dev/null || die "gpgv is required to resolve Ubuntu packages"
     local dir="$CACHE/ubuntu/dists-$arch"; rm -rf "$dir"; mkdir -p "$dir"
     python3 -I - "$base" "$dir/archive-keyring.gpg" <<'PYEOF'
@@ -187,7 +210,7 @@ PYEOF
     done
     mkdir -p "$LOCKS"
     # shellcheck disable=SC2086
-    "${PY[@]}" resolve-debs --base "$base" --arch "$arch" "${idx[@]}" --want $UBUNTU_EXTRA --out "$lock" >&2
+    "${PY[@]}" resolve-debs --base "$status_base" --arch "$arch" "${idx[@]}" --want $packages --out "$lock" >&2
   fi
   local name file sum
   while read -r file sum; do
@@ -210,6 +233,18 @@ python_dist() {  # $1 = aarch64|x86_64; echoes path
   fetch "$PBS_MIRROR/$PBS_RELEASE/$name" "$dir/$name" "$listed" 2>/dev/null \
     || fetch "$PBS_OFFICIAL/$PBS_RELEASE/$name" "$dir/$name" "$listed"
   printf '%s' "$dir/$name"
+}
+
+# The system image's prebuilt rootfs; echoes path. Only the pinned serial is accepted.
+lxc_image() {  # $1 = ubuntu arch
+  local name="lxc-ubuntu-$LXC_RELEASE-$1-$LXC_SERIAL.tar.xz" pin; pin="$(pin_of "$name")"
+  [[ -n "$pin" ]] || die "no pin for $name"
+  local dest="$CACHE/lxc/ubuntu-$LXC_RELEASE-$1-$LXC_SERIAL/rootfs.tar.xz"
+  if [[ ! -f "$dest" || "$(sha256 "$dest")" != "$pin" ]]; then
+    ( fetch "$LXC_MIRROR/$LXC_RELEASE/$1/default/$LXC_SERIAL/rootfs.tar.xz" "$dest" "$pin" ) \
+      || die "$name is not cached and upstream no longer has it: pin a current serial (LXC_SERIAL + PIN)"
+  fi
+  printf '%s' "$dest"
 }
 
 # Node used to run npm on the build host (the official x64 build; never the foreign one).
@@ -445,6 +480,53 @@ PYEOF
   log "$abi done: $(du -h "$archive" | cut -f1) archive, version $runtime_version"
 }
 
+# System container: the dshns launcher (jniLib) and the system image with its manifest.
+build_system() {
+  local abi="$1" ubuntu_arch clang elf_name
+  case "$abi" in
+    arm64-v8a) ubuntu_arch=arm64; clang=aarch64-linux-android26-clang; elf_name="ARM aarch64" ;;
+    x86_64)    ubuntu_arch=amd64; clang=x86_64-linux-android26-clang;  elf_name="x86-64" ;;
+    *) die "unknown ABI $abi (use arm64-v8a or x86_64)" ;;
+  esac
+  if [[ -z "$(pin_of "lxc-ubuntu-$LXC_RELEASE-$ubuntu_arch-$LXC_SERIAL.tar.xz")" ]]; then
+    log "no pinned system image for $abi: system container not built"
+    return 0
+  fi
+  log "=== $abi system container ==="
+  local work="$WORK/$abi" out="$OUT/$abi"
+  local assets="$out/assets/runtime" jni="$out/jniLibs/$abi"
+  mkdir -p "$work" "$assets" "$jni"
+  local ndk="${ANDROID_NDK_HOME:-${ANDROID_HOME:-$HOME/android-sdk}/ndk/$NDK_VERSION}"
+  local cc="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/$clang"
+  [[ -x "$cc" ]] || die "Android NDK $NDK_VERSION clang not found ($cc): install it or set ANDROID_NDK_HOME"
+  "$cc" -static -O2 -Wall -Wextra -Werror -s -o "$jni/libdshns.so" "$HERE/container/dshns.c"
+  chmod 0755 "$jni/libdshns.so"
+  file -b "$jni/libdshns.so" | grep -q "$elf_name" || die "ABI mismatch: libdshns.so: $(file -b "$jni/libdshns.so")"
+
+  local image base
+  image="$(lxc_image "$ubuntu_arch")"
+  base="$(ubuntu_base "$ubuntu_arch")"   # its archive keyring verifies the package indexes
+  ubuntu_debs "$ubuntu_arch" "$base" "$SYSTEM_EXTRA" "$image" "$LOCKS/ubuntu-noble-$ubuntu_arch-system.json" \
+    > "$work/system-debs.txt"
+  local -a debs=(); mapfile -t debs < "$work/system-debs.txt"
+  local inputs_sha
+  inputs_sha="$( {
+      echo "$SYSTEM_REVISION $abi $LXC_RELEASE $LXC_SERIAL $SYSTEM_EXTRA $COMPRESS $XZ_PRESET $SOURCE_DATE_EPOCH"
+      sha256 "$image"; [[ ${#debs[@]} -eq 0 ]] || sha256sum "${debs[@]}" | cut -d' ' -f1
+      sha256 "$HERE/build-runtime.sh"; sha256 "$HERE/lib/rtbuild.py"
+    } | sha256sum | cut -c1-12 )"
+  local version="${SYSTEM_REVISION}-ubuntu-$LXC_RELEASE-$LXC_SERIAL-$inputs_sha"
+  local info
+  info="$(printf '{"imageVersion":"%s","base":{"source":"%s","serial":"%s","sha256":"%s"}}' \
+    "$version" "$LXC_MIRROR/$LXC_RELEASE/$ubuntu_arch/default/$LXC_SERIAL/rootfs.tar.xz" "$LXC_SERIAL" "$(sha256 "$image")")"
+  log "assembling system image ($COMPRESS)"
+  "${PY[@]}" system-image --abi "$abi" --base "$image" "${debs[@]/#/--deb=}" --image-info "$info" \
+    --launcher "$jni/libdshns.so" --out "$assets/system-$abi.tar.$COMPRESS" --report "$out/system-report.json" \
+    --manifest "$assets/system.json" --compress "$COMPRESS" --xz-preset "$XZ_PRESET" --threads "$XZ_THREADS" \
+    --epoch "$SOURCE_DATE_EPOCH" >&2
+  log "$abi system container done: $(du -h "$assets/system-$abi.tar.$COMPRESS" | cut -f1) image, version $version"
+}
+
 write_index() {
   python3 -I - "$OUT" <<'PYEOF'
 import json, os, sys
@@ -459,17 +541,26 @@ for abi in ("x86_64", "arm64-v8a"):
         "runtimeVersion", "rootfs", "rootfsSha256", "rootfsBytes", "uncompressedBytes", "entries",
         "dshVersion", "nodeVersion", "pnpmVersion", "ubuntuVersion", "prootVersion")}
     index["abis"][abi]["jniLibs"] = {n: {"sha256": v["sha256"], "bytes": v["bytes"]} for n, v in m["jniLibs"].items()}
+    sp = os.path.join(out, abi, "assets", "runtime", "system.json")
+    if os.path.isfile(sp):
+        s = json.load(open(sp))
+        index["abis"][abi]["system"] = {k: s.get(k) for k in ("imageVersion", "image", "imageSha256", "imageBytes")}
 json.dump(index, open(os.path.join(out, "manifest.json"), "w"), indent=2)
 print("wrote " + os.path.join(out, "manifest.json"))
 PYEOF
 }
 
 main() {
+  local system_only=0
+  if [[ "${1:-}" == --system-only ]]; then system_only=1; shift; fi
   local -a abis=("$@")
   [[ ${#abis[@]} -gt 0 ]] || abis=(x86_64 arm64-v8a)
   mkdir -p "$CACHE" "$WORK" "$OUT"
   local abi
-  for abi in "${abis[@]}"; do build_abi "$abi"; done
+  for abi in "${abis[@]}"; do
+    [[ "$system_only" == 1 ]] || build_abi "$abi"
+    build_system "$abi"
+  done
   write_index
 }
 
