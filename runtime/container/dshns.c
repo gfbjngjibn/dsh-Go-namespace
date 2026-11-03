@@ -1168,11 +1168,24 @@ static int relay_listen(int port) {
   return lfd;
 }
 
-// A child of `exec`, in the host netns, until the wrapper dies.
-static void relay_serve(int lfd, int port, int netns_fd) {
+// A child of `exec`, in the host netns, until the wrapper dies: then the
+// write end of ALIVE closes. No signal would do: the wrapper turns into the
+// container's root, which may not signal this host-root process, and the
+// kernel checks the parent-death signal the same way.
+static void relay_serve(int lfd, int port, int netns_fd, int alive) {
   signal(SIGCHLD, SIG_IGN);
   say("[net] forwarding 127.0.0.1:%d into the container", port);
+  struct pollfd pfd[2] = {{.fd = lfd, .events = POLLIN}, {.fd = alive, .events = POLLIN}};
   for (;;) {
+    if (poll(pfd, 2, -1) < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    if (pfd[1].revents)
+      break;
+    if (!(pfd[0].revents & POLLIN))
+      continue;
     int client = accept4(lfd, NULL, NULL, SOCK_CLOEXEC);
     if (client < 0) {
       if (errno == EINTR)
@@ -1708,7 +1721,6 @@ static int cmd_exec(void) {
 
   // The app keeps talking to 127.0.0.1:<port>; the relay listens here in the
   // host netns and joins the container netns per connection.
-  pid_t relay = -1;
   if (opt.forward) {
     char nsp[64];
     snprintf(nsp, sizeof(nsp), "/proc/%d/ns/net", (int)init);
@@ -1718,14 +1730,20 @@ static int cmd_exec(void) {
     int lfd = relay_listen(opt.forward);
     if (lfd < 0)
       die("relay: cannot listen on 127.0.0.1:%d: %s", opt.forward, strerror(errno));
-    relay = fork();
+    // Its write end stays open in this process alone (CLOEXEC keeps it from
+    // the guest command) and closes when we exit, however we exit.
+    int alive[2];
+    if (pipe2(alive, O_CLOEXEC) < 0)
+      die("relay: pipe: %s", strerror(errno));
+    pid_t relay = fork();
     if (relay < 0)
       die("relay: fork: %s", strerror(errno));
     if (relay == 0) {
-      prctl(PR_SET_PDEATHSIG, SIGTERM);
-      relay_serve(lfd, opt.forward, netns);
+      close(alive[1]);
+      relay_serve(lfd, opt.forward, netns, alive[0]);
       _exit(0);
     }
+    close(alive[0]);
     close(lfd);
     close(netns);
   }
@@ -1784,11 +1802,8 @@ static int cmd_exec(void) {
   for (;;) {
     int status;
     pid_t done = waitpid(child, &status, WNOHANG);
-    if (done == child) {
-      if (relay > 0)
-        kill(relay, SIGTERM);
+    if (done == child)
       return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-    }
     if (!stopping) {
       struct pollfd pfd = {.fd = 0, .events = POLLIN};
       int closed = got_signal != 0;
