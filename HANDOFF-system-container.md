@@ -1,6 +1,6 @@
 # 交接：dsh-Go 本地引擎换容器（自用改造）
 
-> 2026-11-03 交接，同日第二、第三、第四个会话更新（第三个会话删掉了命名空间启动，加了 Docker/Podman 存储、备份恢复、卸载保护；第四个会话加了独立网络命名空间、Docker 默认网桥接管、宿主 loopback 中继和系统容器里的手机操控，见 §5b、§5c、§6b、§6c）。第五个会话审查并修正了第四个会话的改动，又按 App 里 agent 的自检结果改了提示词、Podman 默认网络、Docker 配置，修了容器重启的竞态（§5d、§5e、§6d、§6e）。前三个会话的改动是 `system-container` 上的 `09e4691`，第四、五个会话的改动是 `6e688aa`，之后修的中继泄漏（§5e）是 `1eaa590`，都已推送到 fork，本仓库不接受外部 PR，这是用户自用的改造。
+> 2026-11-03 交接，同日第二、第三、第四个会话更新（第三个会话删掉了命名空间启动，加了 Docker/Podman 存储、备份恢复、卸载保护；第四个会话加了独立网络命名空间、Docker 默认网桥接管、宿主 loopback 中继和系统容器里的手机操控，见 §5b、§5c、§6b、§6c）。第五个会话审查并修正了第四个会话的改动，又按 App 里 agent 的自检结果改了提示词、Podman 默认网络、Docker 配置，修了容器重启的竞态（§5d、§5e、§6d、§6e）。前三个会话的改动是 `system-container` 上的 `09e4691`，第四、五个会话的改动是 `6e688aa`，之后修的中继泄漏（§5e）是 `1eaa590`，都已推送到 fork，本仓库不接受外部 PR，这是用户自用的改造。2026-11-05 定下补内核的方案（§9），那一轮没改代码；新内核 2026-11-07 刷进平板后，第六个会话按 §9 改完代码并在新内核上回归（见 §9 "本轮实现与验证"），2026-11-07 已提交并推送到 fork（`system-container` 分支上 `c512310` 之后的那个提交）。2026-11-07 新内核已刷进平板并通过真机检查，里面实际有哪些选项见 §9「新内核实际有什么」（没有 `CGROUP_DEVICE`、没有 ipvlan L3S 模式），可以开始做 §9 的下一轮代码改动。
 > 新会话先读本文，再读 `CLAUDE.md`。
 
 ## 1. 用户已经拍板的决定
@@ -9,12 +9,12 @@
 - **命名空间启动已删除**（第三个会话，用户决定）：那是 proot rootfs + `ns-launch.sh`、node 做 PID 1 的半成品，只用于测试。界面里不再有「命名空间」这种启动方式，只剩 系统容器 / 直接启动 / 兼容启动；检查页里「挂载命名空间」之类的技术项保留。
 - **存储与备份（第三个会话拍板）**：Docker/Podman 存储是 32 GB 稀疏 ext4 镜像，放 App 私有目录（`files/system/storage.img`，不放 `/data/adb`），带日志，引擎页可「扩容 16 GB」；「删除系统容器」连存储一起删；「能备份的都备份」（容器系统 + 存储 + `/root`），只走 App 里的按钮；被别的 App 检测时，让用户先「退出 DSH Go（含容器）」，不用 `ksud kernel nuke-ext4-sysfs`（见 §4）；常见问题里写系统容器一节。
 - **系统容器第一期：已实现，真机跑通**（见 §5、§6）：systemd 做 PID 1。需求包括数据库、Docker/Podman（"开发环境的一部分"），不需要图形界面。Docker/Podman 的存储已实现（§5b）；Podman 能跑；Docker 在 §5c 之后也能跑（默认网桥、外网、`-p` 已实测）。
-  - **第二期（本次已实现，见 §5c）**：独立网络命名空间 + NAT；Docker 默认网桥、容器内 Docker、手机操控的 netns 可达性都靠它。容器默认走 App 当前的网络（VPN 开时跟 `tun0`），宿主 loopback 用 TCP 中继保持 App 的 127.0.0.1 来源；Docker 的 `daemon.json` 由 App 接管（引擎页开关，默认关，当前设备已开）。
+  - **第二期（本次已实现，见 §5c）**：独立网络命名空间 + NAT；Docker 默认网桥、容器内 Docker、手机操控的 netns 可达性都靠它。容器默认走 App 当前的网络（VPN 开时跟 `tun0`），宿主 loopback 用 TCP 中继保持 App 的 127.0.0.1 来源；Docker 的 `daemon.json` 由 App 接管（引擎页开关，第五个会话改为默认开）。
   - 用新的预制 Ubuntu 镜像（LXC noble），不在现有 rootfs 上缝补。能从 Droidspaces（`../Droidspaces-OSS`，GPL-3.0，和本项目 AGPL-3.0 兼容）抄就抄，但不依赖它运行。
   - 基础镜像**打进 APK**，但要能**单独更新**；现有 proot 那套保留。
   - **proot 和系统容器共用 `/root`**。
   - 容器以**守护进程运行**，App 被杀、更新都不影响它；同时要一个明显的「退出 DSH Go（含容器）」按钮（放在引擎页和常驻通知），先确认 → 停引擎 → 让 systemd 正常关机（超时约 60 s 强杀）→ 关 App。
-  - **不补内核**（缺 CGROUP_PIDS、NF_TABLES、BRIDGE_NETFILTER、AUTOFS、CHECKPOINT_RESTORE）。不需要资源限制，不用 k8s。运行要求检查里这几项算"警告"，不算"不通过"。
+  - **改为补内核**（2026-11-05 用户决定，取代原来的"不补内核、这几项算警告"）：系统容器只面向自己补过内核的设备，不考虑原厂内核；新补的内核选项按**必需项**检查，缺了不让启动（不学 Droidspaces 做成可选）。用户自己编新内核，下一轮代码等新内核到了再改，见 §9。仍不做内存/CPU 限制（Android 把这些控制器放在 cgroup v1 上，补内核也解决不了），不用 k8s。
 - 安全模型：App 已在 SukiSU 授权 root；容器里的进程必须带 KernelSU 的 no-new-privs 标志（`su --ksu-no-new-privs`，或启动器调 ioctl `_IO('K',21)`）。真机已验证：带标志后，容器内执行 su 和 GRANT_ROOT 都会被拒。第三个会话补测：`su --ksu-no-new-privs` 本身就有效；被拒时 su **仍会执行、退出码 0**，只是以 App 身份运行、能力位全 0，所以不能拿退出码判断（`dshns trial` 看 `id -u`）。dshns 的 start/exec/run/trial 自己也调 ioctl 21。
 
 ## 2. 环境与操作要点
@@ -24,7 +24,7 @@
 - USB 是用户手动挂给 WSL 的，开始前先 `~/android-sdk/platform-tools/adb devices` 确认设备在。
 - **在设备上用 root 执行命令要写成 `adb shell su <<'EOF' ... EOF`**。`adb shell su -c 'a; b'` 只有 a 以 root 运行。
 - 工具链：`source ~/dev/env.sh`，内含 JDK17、Flutter 3.47.7、`ANDROID_HOME=~/android-sdk`、`GRADLE_USER_HOME=~/dev/gradle-home`。用户的 `~/.gradle` 代理失效且缓存损坏，**不要用它**。
-- 构建：`tooling/build-apk.sh -f arm64`，增量约 3 分钟，结束后 `git checkout app/pubspec.lock`（构建会把镜像地址改成国内源）。APK 约 347 MB（含 134 MB 系统镜像）。
+- 构建：`tooling/build-apk.sh -f arm64`，增量约 3 分钟，结束后 `git checkout app/pubspec.lock`（构建会把镜像地址改成国内源）。APK 约 310 MB（含 99 MB 系统镜像；2026-11-07 前是 347 MB / 134 MB）。
 - 安装：`adb install` 在 ColorOS 上会卡住。改用 `adb exec-in "cat > /data/local/tmp/dshgo-<构建号>.apk" < apk`（346 MB 约 2 秒），两边 `sha256sum` 对上后在 su 里执行 `pm install -r -t` 并删除临时文件。
 - `adb push` 经常**整个卡死**（第五个会话连续两次）；被中断的 push 之后还可能把目标文件删掉（连同后来用别的方式写进去的同名文件），所以换个文件名、用上面的 `exec-in`。不要重启 adb 服务（会丢掉 USB 权限，要用户用 root 重新拉起）；不要用 `pkill -f "adb push"`，它会把发起它的那条 shell 命令一起杀掉。
 - 在用户的系统容器里跑命令（容器 root 身份）：把脚本放到 `files/system/rootfs/tmp/` 并 `chown 10346:10346`，然后在 `adb shell su` 里执行下面这段。`dshns exec` 的 stdin 一关就会结束命令（App 就是这样停引擎的），所以要用 fifo 撑住 stdin，脚本跑完再杀掉占位的 sleep：
@@ -120,7 +120,7 @@
   - 新增 `build_system`，用 NDK 编 `libdshns.so`，组 `system.json`，并写进 `out/manifest.json`；
   - 新增 `--system-only` 入口；
   - 没有 PIN 的 ABI（x86_64）跳过系统容器。
-- 产物：`runtime/out/arm64-v8a/assets/runtime/system-arm64-v8a.tar.xz`（134 MB，解压后 679 MB）、`system.json`、`jniLibs/arm64-v8a/libdshns.so`。
+- 产物：`runtime/out/arm64-v8a/assets/runtime/system-arm64-v8a.tar.xz`（2026-11-07 起 99 MB，解压后 475 MB：不再带 apt 索引，见 §9 末尾；之前 134 MB / 679 MB）、`system.json`、`jniLibs/arm64-v8a/libdshns.so`。
 
 ### App 侧（Kotlin）
 
@@ -315,22 +315,23 @@
 - **新镜像从头来**：删掉系统容器 → 启动引擎重新解压（镜像 `…36684ad3a02b`，32 GB 新存储，首次启动设好 37 项属主）→ 不做任何手工处理，`apt install docker.io podman`：钩子把 iptables 切到 legacy，Docker 第一次启动失败的那一次被钩子重启，最后 `active`、`systemctl is-system-running` = running、0 个失败单元；`docker run` 正常；`podman run` 不加参数就在 10.88.0.0/16 网桥上并能出网；FORWARD 策略 ACCEPT。
 - **手机访问**：平板上的 Chrome 打开 `http://10.213.0.2:18085` 显示 Podman 容器里的页面；DSH Go 的 uid 也能访问。（用 `su <别的 App uid>` 测不出来：那样连外网都不通，与容器无关。）
 - **App 里 agent 的再次自检**（同一会话第 4 轮，2 分 34 秒）：逐条核对新 AGENTS.md，15 条里 14 条成立、1 条（局域网默认访问不到）它在容器里无法验证；Docker/Podman 同时跑、发布端口经 10.213.0.2 可达、`daemon.json` 早于 pid 1 写入都给了证据。它列的"还坏着"都是设计如此（没有 `/system`、`/data/adb`，SELinux 被遮住，time ns 共享但改不了时钟，三个目录共用一块存储，没有 IPv6 nat，`docker0` 空闲时 DOWN）。测试容器它自己清掉了。
-- 装包时 `xz-utils` 的 `1ubuntu0.3` 在 ports.ubuntu.com 上 404（镜像站已是 `0.4`，索引没刷新），测试里临时钉了 noble 原版；与本项目无关。
+- 装包时 `xz-utils` 的 `1ubuntu0.3` 在 ports.ubuntu.com 上 404，测试里临时钉了 noble 原版。**当时判断"镜像站索引没刷新"是错的**，真正原因是镜像自带的旧 apt 索引，2026-11-07 查清并修掉（§9 末尾）。
 - **中继泄漏**：旧版 dshns 关 stdin 后中继仍在监听（对照测试复现）；新版关 stdin、`kill -9` 包装进程两种方式下中继都退出、端口释放。装 11032109 后清掉旧版留下的 3 个孤儿中继（父进程 1，3080/3081/3082），从引擎页停止→启动：停止后宿主没有中继，再启动仍是 3080，容器没重启。
 - 平板当前：APK 11032109（含中继修复）；新镜像的容器在跑，引擎在容器里（端口 3080），装着 docker.io 29.1.3 和 podman 4.9.3（各拉了一个 alpine）；「局域网访问容器」关，Docker 接管开；`/data/local/tmp` 已清理；Chrome 里留着一个 `10.213.0.2:18085` 的标签页。
 
 ## 7. 未做 / 未验证 / 已知问题
 
 - **Docker 的接管是开关，默认打开**（第五个会话改的）：关着时 App 不写 `daemon.json`，也不恢复镜像里的旧配置（App 写过且没被改过的文件会删掉），默认网桥是否可用取决于当时文件里的内容——**关着时的 Docker 没测过**。开关只在下次启动引擎（容器重启）时生效。
-- **Docker 的 `iptables` 仍是 legacy**：内核没有 nf_tables。镜像的 apt 钩子在每次装包后切到 legacy（见 §5e），dshns 开机时也切一次（标记 `/var/lib/dsh-go/iptables-legacy.done`，新镜像不带标记）。用 `dpkg -i` 绕过 apt 装 iptables 时，要到下次启动容器才切。
+- ~~iptables 只能用 legacy、容器进程数没有上限、容器没有 IPv6~~：第六个会话随新内核解决（§9 "本轮实现与验证"）。
+- **`podman build` 的 RUN 步骤失败**（2026-11-07 发现，第五个会话去掉 `netns = "host"` 时引入）：容器在用户命名空间里，buildah 把自己当成 rootless，RUN 默认用 slirp4netns，而容器里没有 `/dev/net/tun`（`open("/dev/net/tun"): Permission denied`）；`--network bridge` 被拒（"cannot use networks as rootless"）。`--network host`、`--isolation chroot` 都能成功。`podman run` 不受影响，`docker build` 正常。**用户定的修法（2026-11-07）：不改环境，在提示词（`GuestSetup` 的 `SYSTEM_EXTRA`）和常见问题里写明 `podman build` 要加 `--network host`。**
+- **Podman 容器的 1 号进程不理 SIGTERM 时，停容器会超时被强杀**：systemd 停 `libpod-*.scope` 最多等 90 秒（DefaultTimeoutStopSec），超过 dshns 的 60 秒，于是走 `cgroup.kill`（monitor 日志 "killed by signal 9"）。收尾照常、存储下次 `e2fsck` 是 clean，只是慢。2026-11-07 回归时由测试留下的 `podman run -d alpine sleep 300` 触发。
 - **`/sys` 还是没重挂**（用户决定这一版不修），Docker 启动时会警告缺 `docker0/bridge/stp_state`、`brif/*/state`；不影响默认网桥。
 - **手机操控的 TCP 回退绑定在 `10.213.0.1`**（只对容器网段开放，见 §5d Q2）：abstract unix socket 是 netns 作用域的，容器里的 relay 连不到；App 的 fallback 因此在 loopback 之外再监听桥网关，relay 依次尝试 abstract → 127.0.0.1 → 10.213.0.1。这个监听对容器/宿主可达，仍有 32 字节 token；`/proc/net/tcp` 的 uid 校验对跨 netns 连接拿不到 uid（返回 null 放行），这是设计接受的弱化，和原来 loopback 回退一样。
 - **VPN 开关切换没实测**：策略规则在启动时按 App 当前的表（现在是 tun0）写入，monitor 每 2 秒重看；netd 清规则后会在 2 秒内补回。熄屏/切 VPN 的实际表现待测。
 - **`dshns exec` 的 stdin 是停止线**：从 adb 里直接 heredoc 跑诊断会立刻 EOF 把命令杀掉（退出码 143/无输出）；要用 §2 的 fifo 撑住 stdin。App 的引擎 exec 有自己的管道，不受影响。
 - **引擎仍只绑 127.0.0.1**：`dsh web` 硬拒绝 `0.0.0.0`（"unspecified (wildcard) address"），所以宿主用 TCP 中继（每连接 setns 进容器 netns）而不是 DNAT；`route_localnet` 保持 0。
-- **Docker/Podman `-p` 的宿主访问已测**（§6e，含手机上的 Chrome）；`docker build`/`podman build` 在新镜像上没有重跑，建议再跑一次。
-- 备份（App 先 stop 再 `dshns run`）在竞态修复后没有重跑；stop 现在会等 monitor 收尾，按理不再撞车。
-- **手机操控只验证到 relay 连接**（tcp6 里 `10.213.0.1:43637` ← `10.213.0.2` 的 ESTABLISHED，relay 进程存活）；没有从 DSH 里真正调一次 `mcp__phone__*` 工具。
+- **Docker/Podman `-p` 的宿主访问已测**（§6e，含手机上的 Chrome；2026-11-07 又测了 v4 和 v6）。
+- **手机操控已实测**（2026-11-07）：新对话里让 agent 调 `mcp__phone__screen`，0.1 秒读回屏幕内容。第一次失败是因为 `pm install -r` 之后 ColorOS 没有重新绑定 App 的无障碍服务（设置里仍是启用，`dumpsys accessibility` 的 Bound services 里没有它），App 回的提示是对的；把 `enabled_accessibility_services` 去掉再写回原值后就绑上了。以后每次重装 APK 后要测手机操控，先看一下绑定状态。
 - 没在真机上触发过「系统容器启动失败 → 自动回退」的路径（单元测试覆盖了分类逻辑）。
 - 后台、Doze、低内存查杀下的表现没测过；v1 的 cgroup 还挂在 App 的 `apps`/`top-app` 组下（见 §4）。
 - 容器里执行 `reboot`：init 被 SIGHUP 结束，monitor 当作退出处理，**不会自动重启**。
@@ -345,8 +346,115 @@
 
 ## 8. 建议的下一步
 
+0. §9 的代码改动已做完并在真机回归（2026-11-07，已提交）；`podman build` 按用户定的写进提示词和常见问题；热点不测（平板不能插卡，用户决定不管）（见 §9 "本轮实现与验证"）。
 1. 在系统容器里真正调一次手机操控（`mcp__phone__screen` 等），确认 token/uid/回退路径。
 2. 测 VPN 开关、熄屏/Doze、后台：容器和引擎是否跟着 App 的网络表，netd 清理规则后 2 秒内是否补回。
-3. 重跑一次 `docker build`/`podman build`，以及一次备份 → 恢复。
+3. ~~重跑 `docker build`/`podman build`、备份 → 恢复~~：2026-11-07 已跑，`docker build` 和备份恢复正常，`podman build` 失败（§7）。
 4. 视需要支持容器内 `reboot`（monitor 看到 SIGHUP 时重新启动容器），以及容器状态的定期刷新。
 5. 第二期的收尾：把网络命名空间/Docker 接管/手机 bridge 的验证记录和已知问题继续补全。
+6. App 里 agent 在自检会话第 5–12 轮提的、核实后可以做的几项（用户还没定）：重挂 `/sys`（现在容器里看得到宿主全部网卡和 wlan0 的 MAC）、时区跟随手机（容器是 UTC）、日志上限（`daemon.json` 的 `log-opts`、journald 的 `SystemMaxUse`）、`/sdcard` 只读档。它提的"宿主写 cgroup 就能限内存""把宿主 `/dev/loop*` 绑进容器""`lazy_itable_init=0`"核实下来是错的或不该做。
+
+## 9. 内核方案（2026-11-05 定，新内核 2026-11-07 已刷，代码已改并提交）
+
+### 决定
+
+- 系统容器只面向自己补过内核的设备，**不支持原厂内核**。用户的理由：命名空间这一套从来没打算支持原厂内核；平板现在的内核本来就是用户补过的（第一次补时按 Droidspaces 的检查补齐，缺的是当时 Droidspaces 没检查的项）；对后来的人来说，补几项都是改一次、编一次，不增加成本；做成可选要来回换内核测，测试成本太高。
+- 新补的选项全部是**必需项**（选项 1），缺了不启动；不做 Droidspaces 那样"有就用、没有就少功能"的可选路径。
+- 编内核在本机另一个项目、另一个对话里做，用户自己负责。给那边的提示词已在本对话里给过（选项清单、全部 `=y` 内建、核对最终 `.config`、比对符号 CRC 保证 vendor 模块能加载、刷入后的 6 项验证）。
+- **验证过但不用的办法：RLIMIT_NPROC 按用户命名空间封顶**。6.12 的进程数按用户命名空间汇总计数，上限取自创建者的 RLIMIT_NPROC，前提是创建时真实 uid 不是 root。平板实测，上限设为 200：用非 root 真实 uid 创建时，容器 root fork 到 198 个被拦，容器里另一个 uid 一个也 fork 不出（按整个容器合计），容器 root 调不高（EPERM），宿主 root 把 exec 进程的上限调到 100000 也不影响；现在 dshns 用全局 root 创建，所以完全没有限制。用户决定改用内核的 pids 控制器，这个办法不做。
+
+### OTA 与 KMI
+
+- 刷的是 boot 分区。平板的版本串 `6.12.58-android16-6-…-ab15072794-4k` 是 Google 构建号的格式（不像一加 `-o-` 那种厂商自编的内核），原厂内核就是 Google 编的 GKI。
+- 厂商基本改不了 KMI：高通/联发科和各家外设的 vendor 模块很多是二进制，KMI 一变整条供应链要重编，厂商没能力也没动机；KMI 代号只有 Google 在安全修复非改不可时才加 1，非常罕见；大版本在设备生命周期内不变。用户的态度："厂商要是有本事把 KMI 更新了那我认"。
+- KMI 冻结后符号表**只增不减**：后来的 OTA 里 vendor 模块可能用到新加的符号，用旧源码编的内核会报 `Unknown symbol`。所以 OTA 后稳妥的做法是先看 `uname -r` 里的 `android16-6`，再用同一代号、不旧于 OTA 那版的 GKI 源码重编再刷，而不是把旧镜像原样刷回去。
+- 会改 KMI 的是我们自己加的选项：`CGROUP_PIDS`（cgroup 子系统数）、`NF_TABLES`、`BRIDGE_NETFILTER` 都可能动核心结构体。Google 在 android14-6.1 上专门有 "ANDROID: KMI workaround for CONFIG_NETFILTER_FAMILY_BRIDGE" 这样的提交，打开 bridge netfilter 前先看 android16-6.12 有没有同类处理。
+
+### 要补的选项（全部 `=y`）
+
+- P0，dsh-go 直接要用：
+  - `CGROUP_PIDS`：防止容器耗尽全机 PID，并让 Docker/Podman 的 pids 限制和 systemd 的 `TasksMax` 生效。Android 没有把 pids 挂到 v1 上，补上后出现在 v2 根上，可以委派。
+  - `NF_TABLES` 及 `NF_TABLES_INET/IPV4/IPV6`、`NFT_CT/NAT/MASQ/REDIR/REJECT/COMPAT/FIB_*` 等：Docker 29、Podman 5、firewalld/ufw 默认走 nft，补上后去掉 legacy 切换。代价是 nf_tables 是近几年"用户命名空间提权到宿主 root"最常见的漏洞来源，容器 root 能直接碰到，内核要跟安全补丁。
+  - `IP6_NF_NAT`、`IP6_NF_TARGET_MASQUERADE`：容器经手机用 IPv6 上网。
+  - `BRIDGE_NETFILTER`：Docker 同一网桥上容器之间的隔离规则生效。它对宿主也生效，要验证用网桥实现的热点。
+- P1：`MACVLAN`、`IPVLAN`、`CGROUP_DEVICE`（**最终没有编进内核**，见下面"新内核实际有什么"）、`CHECKPOINT_RESTORE`、`AUTOFS_FS`、`IP_SET`（加常用集合类型和 `NETFILTER_XT_SET`）、`VXLAN`。对非特权容器帮助很小（主要是 Droidspaces 和 k3s 一类用），但按决定一起补、一起定为必需。
+- P2（可选，只对 Droidspaces 有用，用户命名空间里挂不了）：SQUASHFS、ISO9660、UDF、NTFS3、BTRFS、XFS。不进我们的检查。
+- 补内核也解决不了：内存/CPU/IO 限制（v1 布局），mknod、loop、挂块设备文件系统、swap（用户命名空间不允许）。
+
+### 新内核实际有什么（2026-11-07）
+
+来源：编内核的那个对话（`/mnt/d/oneplus_sm8850` 项目，详情见那里的 `CLAUDE.md` "第二轮"一节）；用户要求写进本文档。
+
+- **状态**：新内核已刷进平板，2026-11-07 真机检查全部通过（vendor 模块全部照常加载，root 正常，Wi-Fi、充电正常）。
+- **版本串和旧内核完全相同**（`6.12.58-android16-6-g3edd99dd2b12-ab15072794-4k`），所以检查页不能靠 `uname -r` 区分新旧，只能看 `/proc/config.gz` 里的选项，以及运行时的状态（比如 `cgroup.controllers` 里有没有 `pids`）。
+- **P0 全部有**：
+  - `CGROUP_PIDS`
+  - `NF_TABLES`、`NF_TABLES_INET/IPV4/IPV6`，以及 `NFT_CT`、`NFT_NAT`、`NFT_MASQ`、`NFT_REDIR`、`NFT_REJECT`、`NFT_COMPAT`、`NFT_FIB_INET/IPV4/IPV6`、`NFT_LOG`、`NFT_LIMIT`、`NFT_QUOTA`、`NFT_CONNLIMIT`、`NFT_HASH`、`NFT_NUMGEN`。counter 在 6.12 里已经内建在 nf_tables 核心，没有单独的选项，不要去检查 `NFT_COUNTER`。
+  - `IP6_NF_NAT`、`IP6_NF_TARGET_MASQUERADE`、`BRIDGE_NETFILTER`
+- **P1 除 `CGROUP_DEVICE` 外全部有**：
+  - `MACVLAN`、`IPVLAN`、`CHECKPOINT_RESTORE`、`AUTOFS_FS`、`VXLAN`
+  - `IP_SET`，加 `IP_SET_HASH_IP/NET/IPPORT/IPPORTNET`、`IP_SET_BITMAP_PORT`、`IP_SET_LIST_SET`，以及 `NETFILTER_XT_SET`
+- **内核里没有、检查页不能要求的**：
+  - **`CGROUP_DEVICE`：不要放进 `KERNEL_OPTIONS`，否则 dsh-go 在这个内核上会拒绝启动。** 不加的原因（用户 2026-11-05 决定）：
+    - Droidspaces 源码从来不用它，它只出现在 Droidspaces"非 GKI 内核"的配置清单里。
+    - cgroup v2 的设备控制走 BPF，内核已经有 `CGROUP_BPF=y`；devices 控制器只对 cgroup v1 有用。
+    - 在 GKI 上加它，要再占一个 cgroup 子系统位置，还会让 freezer、net_cls、net_prio 的编号后移，vendor 模块会出问题。
+  - **ipvlan 的 L3S 模式**（`CONFIG_IPVLAN_L3S`，以及它会带上的 `NET_L3_MASTER_DEV`）：它会往 `net_device` 中间插字段，所以内核里关掉了。ipvlan 的 L2、L3 模式正常可用（Docker 的 ipvlan 驱动默认就是 l2）；只有 `mode l3s` 用不了。检查页只查 `CONFIG_IPVLAN=y` 就行，不要查 `IPVLAN_L3S`。
+  - P2 只有 `SQUASHFS`（含 XZ、ZSTD）、`ISO9660_FS`、`UDF_FS`；`NTFS3`、`BTRFS`、`XFS` 没加。P2 本来就不进我们的检查。
+- **几个和 dsh-go 有关的运行时行为**：
+  - **br_netfilter 只在宿主命名空间默认关闭**：内核补丁让宿主网络命名空间的 `net.bridge.bridge-nf-call-{arptables,iptables,ip6tables}` 默认是 0，宿主的行为和没有 br_netfilter 时一样，所以上面 `BRIDGE_NETFILTER` 那条"要验证热点"的顾虑在默认状态下不存在。其他网络命名空间默认仍是 1，所以系统容器里的 Docker 不用 dsh-go 做任何事，网桥隔离就会生效。**dsh-go 不要改宿主的这三个值。**
+  - 刷完新内核后，`/sys/fs/cgroup/cgroup.controllers` 里有 `pids`，根组的 `cgroup.subtree_control` 仍然是空的。开不开 pids 由 dshns 自己管，见下面第 2 条。
+  - 宿主 ip6tables 里可能会有一张空的 `nat` 表：droidspacesd 检测 NAT66 时会把它建出来（只有默认策略，没有规则）。dsh-go 做 IPv6（第 4 条）时不要把"已经有 nat 表"当成"已经配好了"。
+  - nf_tables 的安全代价（见上面 P0 那条）依旧存在：这个内核的源码停在 6.12.58。
+- **本对话 2026-11-07 在平板上复核（开机约 16 分钟时）**：版本串同上；`/proc/config.gz` 里上面的 P0、P1 抽查都是 `=y`，`CGROUP_DEVICE`、`IPVLAN_L3S` 都是 not set；`cgroup.controllers` = `pids`，根组 `subtree_control` 为空，`dsh-go`、`droidspaces` 两个组都不存在；宿主 `bridge-nf-call-{arp,ip,ip6}tables` 都是 0，`unshare -n` 新建的 netns 里都是 1；宿主 `ip6tables -t nat -S` 只有 4 条默认策略；`lsmod` 685 行，dmesg 里没有符号报错。容器在 13:49 启动过一次，systemd、Docker、Podman 都起来了，13:56 设备重启时随之结束（所以 monitor 日志没有收尾记录）；那次启动时设备没网络，所以日志里没有 "follows the app's table"。不确定 13:49 那次是否已经是新内核，下一轮回归时以 App 实际启动为准。
+
+### 下一轮代码改动（计划；2026-11-07 已按此实现，见本节末尾）
+
+1. **检查页**（`SystemCheck.kt`）：`KERNEL_OPTIONS` 现在是 5 项、只算警告。改成必需项，并按上面 P0、P1 补全（`IP6_NF_NAT`、`IP6_NF_TARGET_MASQUERADE`、nft 的子项、`MACVLAN`、`IPVLAN`、`IP_SET`、`VXLAN` 等；**不含 `CGROUP_DEVICE` 和 `IPVLAN_L3S`**，以"新内核实际有什么"那一节为准）；最好再实测 `/sys/fs/cgroup/cgroup.controllers` 里有 `pids`。改 `SystemCheckTest.kernelOptions`、类注释、检查页和 FAQ 里关于内核要求的文案（中英）。
+2. **pids**：dshns 在 `dsh-go` 的 `cgroup.subtree_control` 打开 `+pids`，给容器写 `pids.max`（讨论时的建议：`pid_max` 的一半，这台是 16384，再设个顶，比如 65536；线程也算，不要定太低）；镜像的 `containers.conf.d/50-dsh-go.conf` 去掉 `pids_limit = 0`（镜像版本会变）。
+   - **根组的 `+pids` 只在容器运行期间开着**（来源：2026-11-05 编内核的那个对话，`/mnt/d/oneplus_sm8850` 项目，讨论"相关程序不运行时宿主尽量保持原生"时定的；用户同意写进来）。要在 `dsh-go` 里开 pids，先得在 v2 根组 `/sys/fs/cgroup/cgroup.subtree_control` 写 `+pids`，否则 `dsh-go/cgroup.controllers` 里没有 pids。根组一开，Android 的每个顶层 cgroup（`uid_*` 等）都会带上 pids 计数，这是宿主状态的改变。平板上根组的 `subtree_control` 原生是空的（2026-11-05 实测）。原因：用户的目标是不跑容器、或关掉容器支持时宿主回到原生状态。内核只负责提供 pids 控制器，开不开由用户态决定，所以这件事只能 dshns 自己管。
+   - 做法：启动时先读根组的 `subtree_control`，原来就有 `pids` 就不动，也不记账；原来没有才写 `+pids`，并记下"是 dshns 加的"。停止时（包括关掉容器支持、上次异常退出后的清理）先删掉 `dsh-go` 自己的组或在其中写 `-pids`，再对根组写 `-pids`，顺序反过来会因为子组还在用而失败。根组写 `-pids` 返回 EBUSY 时，说明别人还在用，按正常情况处理，不报错。
+   - 别人也会改根组：Droidspaces 的容器设了 pids 上限时，会往根组写 `+pids`，而且从来不撤（Droidspaces-OSS `src/cgroup.c` 第 477–482 行）。所以只撤 dshns 自己加的那一次，不要一律写 `-pids`。
+   - 补充（本对话核对内核和 Droidspaces 源码）：
+     - 根组写 `-pids` 时，内核只在某个子组的 `subtree_control` 里也有 `pids` 时才返回 EBUSY。如果某个根下的直接子组只设了 `pids.max`、自己的 `subtree_control` 里没有 pids，它的上限会被**悄悄撤掉**。Droidspaces 不受影响：它在 `droidspaces/` 组的 `subtree_control` 里也写了 `+pids`，而且从不删这个组，所以它跑过之后我们撤会得到 EBUSY。
+     - "是 dshns 加的"这个记录要带上本次开机的 `/proc/sys/kernel/random/boot_id`：cgroup 状态重启就没了，记录却留在 App 目录里。不比对 boot_id 的话，重启后别人加的 `+pids` 可能被当成我们加的撤掉。
+     - Droidspaces 的 `force_cgroupv1` 容器会把还没人用的控制器挂到 v1 上，pids 也在其中。如果它在本次开机里先跑，v2 的 `cgroup.controllers` 里就没有 pids 了。dshns 启动时要再查一次，没有就明确报错退出，不要静默跳过；检查页过了不代表启动时一定还有。
+3. **去掉 iptables-legacy 切换**：dshns 的 `fix_iptables_legacy()` 和标记 `iptables-legacy.done`，`rtbuild.py` 里的 `usr/lib/dsh-go/iptables-legacy` 和 `etc/apt/apt.conf.d/50dsh-go-iptables`。已经装好的容器里 alternatives 还指向 legacy，要决定是否切回 nft（同一 netns 里两种后端混用会出问题）。
+4. **IPv6**：dshns 给网桥和容器分 IPv6 地址（ULA）、加 ip6tables 的 MASQUERADE/FORWARD 和 `ip -6 rule` 策略路由（跟 v4 一样跟 App 的表），`net_cleanup` 对应清理；`daemon.json` 的 `ip6tables` 改 true（签名会变，容器重启一次）；提示词和 FAQ 里的网络说明补上 IPv6。工作量最大的一项。
+5. 改完在新内核上把启动、exec、备份恢复、Docker/Podman（含 `build`、`-p`、IPv6）、热点各回归一遍。容器 netns 里 `bridge-nf-call-iptables` 默认是 1，所以同一网桥上容器之间的流量现在会经过 FORWARD 链（Docker 的隔离规则、`ip-forward-no-drop`、netavark 的规则都会作用到它），要额外测一下 Docker 和 Podman 各自网桥上容器之间能不能互通。
+
+### 本轮实现与验证（2026-11-07，第六个会话，APK 11071439，已提交）
+
+改动（按上面 1–4 的顺序）：
+
+1. **检查页**：`SystemCheck.KERNEL_OPTIONS` 改成 10 个必需项，每项带它要一起开的选项：`CGROUP_PIDS`；`NF_TABLES`（含 INET/IPV4/IPV6、`NFT_CT/NAT/MASQ/REDIR/REJECT/COMPAT/FIB_*`）；`IP6_NF_NAT`（含 MASQUERADE）；`BRIDGE_NETFILTER`；`IP_SET`（含 6 种集合和 `NETFILTER_XT_SET`）；`MACVLAN`；`IPVLAN`；`VXLAN`；`CHECKPOINT_RESTORE`；`AUTOFS_FS`。只认 `=y`（GKI 设备不会加载我们的模块）。缺了的项列在 `Item.missing` 里，界面显示"未开启：CONFIG_…"；读不到配置算不通过；`CGROUP_PIDS` 还要 `cgroup.controllers` 里真有 `pids`，没有时给 `unavailable`（可能被 cgroup v1 占了）。去掉了整个"警告"机制（Kotlin `Item.warn`、Dart `SystemCheckItem.warn`、黄色图标、`phoneSystemCheckPassedWarn` 和 5 条 `phoneSystemCheckOff*`），新增 `phoneSystemCheckOptionMissing`、`phoneSystemCheckPidsUnavailable`。`phoneSystemHint` 和 FAQ 写明要补过的内核、原厂内核不行。
+2. **pids**（`dshns.c` 的 `pids_enable`/`cg_release`/`cg_prepare`）：`cg_prepare` 先查 `cgroup.controllers` 有没有 pids，没有就报错退出（"no pids controller on cgroup2 …"）；根组 `subtree_control` 没有 pids 才写 `+pids`，并在 state 目录写 `pids.root`（内容是本次开机的 boot_id；启动时发现是旧开机的就删掉）；再在 `dsh-go` 里开 `+pids`，容器组 `pids.max` = `pid_max / 2`，最多 65536（这台 16384）。`cg_release` 在删掉 `dsh-go` 之后、且记录的 boot_id 是本次开机时才对根组写 `-pids`，EBUSY 当正常处理，然后删记录；`cg_tidy`（monitor 收尾、start 失败）和 `run`（备份/恢复）都走它。镜像去掉 `containers.conf.d/50-dsh-go.conf`。
+3. **去掉 legacy 切换**：删了 dshns 的 `fix_iptables_legacy()`、镜像的 `usr/lib/dsh-go/iptables-legacy` 和 `etc/apt/apt.conf.d/50dsh-go-iptables`；`phoneSystemDockerHint` 的"legacy iptables"改掉。镜像版本 `s1-ubuntu-noble-20261018_1335-a9e6d2a742ed`。
+4. **IPv6**：网络部分改成按地址族各做一遍（`struct family`，`NET_FAMILIES` = v4、v6）：MASQUERADE、FORWARD 进出、局域网开关、网关 INPUT DROP、TCPMSS、`ip -4/-6 rule` 6060/6070（v6 同样跟 App 的表）、转发开关的记录与恢复（v6 的是 `state/ip6_forward.orig`，`forward_on` 只在值不对时才写，因为写 v6 的总开关会遍历所有接口）、清理。地址：网桥 `fd10:213::1/64`，容器 `fd10:213::2/64`。宿主上 Android 把接口的 IPv6 前缀路由放进按接口分的表（`accept_ra_rt_table = -1000`，见 `fe80::/64 dev dsh-br0 table 1023`），所以网桥地址加 `noprefixroute`，`fd10:213::/64 dev dsh-br0` 在网桥 up 之后手动加进 main（网桥没 up 时加会失败，第一版就是这样）。容器 netns 里该值是 0，不受影响。`daemon.json` 改为 `ip6tables: true`、`ipv6: true`、`fixed-cidr-v6: fd10:213:d0c::/64`（签名随之变，容器重启一次）。提示词和 FAQ 加了 IPv6 一句。
+- 测试：Kotlin 791 个通过（新增 `SystemCheckTest` 3 条，改了 `GuestAgentsModeTest`、`SystemContainerTest`）；`flutter analyze` 无问题；`direct_engine_settings_test` 和 `test/runtime` 35 个通过（"警告也能开启"的用例改成"缺内核选项就开不了"）；`l10n_merge --check`、`guide_sync --check`、rtbuild 的 unittest 通过；dshns arm64 `-Werror` 和 x86 `-fsyntax-only` 通过。
+
+已装好的容器（旧镜像解压的 rootfs）手工处理过：iptables/ip6tables 的 alternatives 切回 `--auto`（nft），删了 `iptables-legacy.done`，删了旧镜像带的 apt 钩子、`/usr/lib/dsh-go/iptables-legacy` 和 Podman 的 `pids_limit = 0`。新装的镜像本来就没有这些。**没有用新镜像从头装一次**（要删容器）。
+
+真机验证（新内核，APK 11071430 / 11071439）：
+- 检查页 25 项全部满足（"全部满足"）。
+- pids：根组和 `dsh-go` 的 `subtree_control` = `pids`，`dsh-go/dsh/pids.max` = 16384（文件属主宿主 root，容器 root 写它 Permission denied），容器里的 systemd 自己往下开了 pids（`TasksMax` 有值了）；`pids.root` 的 boot_id 和本次开机一致。停容器（备份时）后根组 `subtree_control` 回到空、记录删掉、`dsh-go` 不在。`docker run --pids-limit 8` 里 `pids.max` = 8、超出时 `can't fork`；Podman 容器默认 `pids.max` = 2048。
+- 容器：`systemctl is-system-running` = running、0 个失败单元；iptables `v1.8.10 (nf_tables)`；Docker active。
+- IPv6：容器 `eth0` 有 `fd10:213::2/64`，默认路由经 `fd10:213::1`；`curl -6` 清华镜像站 200（远端 `2402:f000:1:400::2`），`ping -6 2400:3200::1` 通；宿主 ip6tables 的 nat/FORWARD/INPUT 规则、`ip -6 rule` 6060/6070（→ ovnet0）都在。
+- Docker：默认网桥上的容器有 `fd10:213:d0c::2`，两个容器之间 v4/v6 都能互通（br_netfilter 打开后也通），v4/v6 出网通，`-p 18091` 在容器 netns 和宿主上经 `10.213.0.2` 和 `[fd10:213::2]` 都能访问；`docker build`（legacy builder）正常。
+- Podman：两个容器之间互通、出网通、`-p 18092` 宿主可访问；`podman build` 失败（见 §7）。
+- 备份 → 恢复：备份 619 MB，从点按钮到完成约 70 秒（其中停容器约 60 秒被强杀，原因见 §7 Podman 那条）；恢复约 30 秒；之后启动引擎，新 dshns 从头建网络，日志无报错（"dsh-br0 10.213.0.1/16 fd10:213::1/64 <-> dsh-v0"），恢复后的容器 running、iptables 仍是 nft、旧钩子没回来。停容器后宿主：没有 `dsh-br0`、规则、策略路由和 v6 路由，`ip_forward` 回到原值 0，IPv6 转发原值是 1、保持 1。
+- 局域网开关：打开时 v4、v6 的 FORWARD 都换成无条件 `-o dsh-br0 -j ACCEPT`，关掉后都换回 `RELATED,ESTABLISHED`，monitor 日志各一行。
+- 引擎在容器里（诊断页"当前运行方式 系统容器"），手机操控 relay 从 `10.213.0.2` 连到 `10.213.0.1`。
+- **热点不测**：平板不能插卡，用户决定不管（br_netfilter 在宿主默认关闭，按理不受影响；v6 的转发恢复在开着热点时的判断也没测）。
+- **手机操控**（APK 11071503）：新对话 "Phone control test…" 里 agent 调 `mcp__phone__screen` 成功（见 §7 手机操控那条）。
+- **新镜像从头装**（APK 11071503）：引擎页停止容器 → 删除系统容器 → 启动引擎，17 秒内解压镜像 `…a9e6d2a742ed`、新建 32 GB 存储、首次启动设好 37 项属主、引擎就绪；旧叠加文件都不在，`pids.max` 16384。`apt-get install docker.io podman` 不做任何手工处理：iptables 默认就是 `nf_tables`，Docker 第一次就 active，`systemctl is-system-running` = running、0 个失败单元，Docker 的 IPv6 MASQUERADE 在。（装包时 `xz-utils 1ubuntu0.3` 又是 404，测试里钉了 noble 原版并 `--allow-downgrades`；原因和修法见下面"镜像不再带 apt 索引"，之后已升回 `0.4`。Docker Hub 在设备不挂代理时连不上，测试从 `docker.m.daocloud.io` 拉 alpine，再 `docker save | podman load`。）Docker 容器 v4/v6 出网、`docker build`、`-p` 宿主经 `10.213.0.2` 和 `[fd10:213::2]` 访问都通；Podman 出网、`podman build --network host`、`-p` 都通。Docker 容器默认 `pids.max` = 2457，是容器里 systemd 的 DefaultTasksMax（容器上限 16384 的 15%）；Podman 默认 2048。`/root/.dsh/AGENTS.md` 和手册技能的常见问题里都有 `podman build` 要加 `--network host`。
+
+平板当前：APK 11071503；容器是新镜像从头装的（旧容器连同里面的 Docker/Podman 数据已删，今天的备份还在），装了 docker.io 和 podman（`xz-utils`/`liblzma5` 是降级后的 noble 原版），Docker 和 Podman 各有一个 `alpine`；引擎在容器里（3080）；「局域网访问容器」关，Docker 接管开；测试容器已删；对话列表里多了一个 "Phone control test…" 对话；`Download/DSH-Go/backups` 里多了一份 `dsh-system-20261107-144555.tar.gz`（619 MB，含对话和 API 配置）。
+
+### 镜像不再带 apt 索引（2026-11-07，APK 11071546，已提交）
+
+- **原因**：LXC 镜像带着它构建时（10 月 18 日）的 `/var/lib/apt/lists`（30 个文件，约 204 MB），我们原样打进了镜像；App 解压时不保留 mtime，所有文件的 mtime 都是解压时刻。`apt-get update` 拿本地文件的 mtime 发 If-Modified-Since，上游 InRelease 只要发布得比解压早，就回 304，apt 显示 `Hit`，继续用 10 月 18 日的索引；索引里的版本（如 `xz-utils`/`liblzma5 1ubuntu0.3`）在仓库里已被新版替换，下载就 404。所有"10 月 18 日之后更新过的包"都会这样，直到上游再发布一次索引。第五个会话那次 404 是同一原因（当时误判成镜像站没刷新）。
+- **修法**（用户选的第一种）：`rtbuild.py` 的 `cmd_system_image` 丢掉 `var/lib/apt/lists/` 下的普通文件（只留目录，报告里记为 `apt-lists`），和 Ubuntu 官方容器镜像一样；提示词本来就让 agent 先 `apt-get update`。镜像 `s1-ubuntu-noble-20261018_1335-2b194891b81e`，解压后 679 → 475 MB，压缩包 134 → 99 MB，APK 347 → 310 MB；文案里的"约 680 MB"改成"约 480 MB"（`phoneSystemHint`、`phoneSystemStartInstallHint`、FAQ）。另一种做法（解压时保留 mtime）没采用。
+- 平板上的容器（a9e6d2a742ed 解压的，仍带旧索引的那个）：删掉 `/var/lib/apt/lists/*` 后重新 update，拿到当天的索引，`xz-utils`/`liblzma5` 升回 `5.6.1+really5.4.5-1ubuntu0.4`；另有 15 个包可升级（镜像之后的正常更新，没动）。
+- **新镜像从头装又验证了一遍**（APK 11071546，用户要求"确保新装 App 状态下不会磕磕绊绊"）：删除系统容器后启动引擎，15 秒就绪，rootfs 是 `…2b194891b81e`，`/var/lib/apt/lists` 里 0 个文件；没 update 直接 `apt-get install` 报 "Unable to locate package"（正常，提示词要求先 update）；`apt-get update && apt-get install -y docker.io podman` 不加任何参数，56 秒装完，没有 404，`xz-utils`/`liblzma5` 直接是 `1ubuntu0.4`；iptables `nf_tables`，Docker 第一次就 active，running、0 个失败单元。Docker v4/v6 出网、`docker build`、`-p` 宿主经 v4/v6 访问，Podman 出网、`podman build --network host`、`-p` 都通（alpine 仍从 daocloud 拉，设备没挂代理时 Docker Hub 不通）。测试容器已删。
+- 平板当前：APK 11071546（重装后无障碍服务仍绑定着）；容器是 `…2b194891b81e` 从头装的，装了 docker.io 和 podman，Docker、Podman 各有一个 `alpine`；引擎在容器里（3080）；「局域网访问容器」关，Docker 接管开；`Download/DSH-Go/backups` 里有今天 14:46 的备份；对话列表里有 "Phone control test…" 对话。

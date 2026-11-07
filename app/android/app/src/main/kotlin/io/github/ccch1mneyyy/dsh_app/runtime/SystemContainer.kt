@@ -270,7 +270,9 @@ object SystemContainer {
         {
           "bridge": "docker0",
           "iptables": true,
-          "ip6tables": false,
+          "ip6tables": true,
+          "ipv6": true,
+          "fixed-cidr-v6": "fd10:213:d0c::/64",
           "ip-forward-no-drop": true
         }
     """.trimIndent() + "\n"
@@ -291,10 +293,10 @@ object SystemContainer {
 
     /**
      * The app takes Docker's daemon configuration over: a bridge Docker can create inside the
-     * container's netns, iptables on the legacy backend (the kernel has no nf_tables), no
-     * IPv6 table, and FORWARD's policy left at ACCEPT (Docker's DROP would also drop the
-     * phone's connections to ports Podman publishes). Called before the container starts; the
-     * daemon reads it at boot.
+     * container's netns with Docker's iptables rules, IPv6 on it too (a ULA Docker NATs, as
+     * dshns NATs the container's own), and FORWARD's policy left at ACCEPT (Docker's DROP
+     * would also drop the phone's connections to ports Podman publishes). Called before the
+     * container starts; the daemon reads it at boot.
      */
     fun takeoverDocker(context: Context, log: (String) -> Unit): Boolean = try {
         val file = dockerConfig(context) ?: error("etc/docker is not a plain directory of the rootfs")

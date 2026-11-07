@@ -62,7 +62,12 @@
 #include <time.h>
 #include <unistd.h>
 
-#define CG_ROOT "/sys/fs/cgroup/dsh-go"
+#define CG_HOST "/sys/fs/cgroup"
+#define CG_ROOT CG_HOST "/dsh-go"
+// In the state dir: this boot's id, when dshns turned pids on in the root cgroup.
+#define PIDS_MARK "pids.root"
+// The container's ceiling on PIDs (threads count too): half of pid_max, at most this.
+#define PIDS_CAP 65536
 #define OWNERSHIP "/var/lib/dsh-go/ownership.tsv"
 #define CONSOLE_CAP (1 << 20)
 // How long stop waits for a dead container's monitor to finish its teardown.
@@ -234,7 +239,82 @@ static void seccomp_guard(void) {
     say("seccomp guard not installed: %s", strerror(errno));
 }
 
+static int open_state(const char *name, int flags);
+
 // cgroup2 ------------------------------------------------------------------
+
+// The first line of a small file, without its newline.
+static int read_line(const char *path, char *buf, size_t size) {
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return -1;
+  ssize_t n = read(fd, buf, size - 1);
+  close(fd);
+  if (n < 0)
+    return -1;
+  buf[n] = 0;
+  buf[strcspn(buf, "\n")] = 0;
+  return 0;
+}
+
+// Whether the space-separated controller list names NAME.
+static int has_controller(const char *list, const char *name) {
+  size_t n = strlen(name);
+  for (const char *p = list; (p = strstr(p, name)); p += n)
+    if ((p == list || p[-1] == ' ') && (p[n] == 0 || p[n] == ' '))
+      return 1;
+  return 0;
+}
+
+static void boot_id(char *buf, size_t size) {
+  if (read_line("/proc/sys/kernel/random/boot_id", buf, size) < 0)
+    buf[0] = 0;
+}
+
+// The pids controller caps the whole container. Turning it on in the host's
+// root cgroup gives every top-level Android cgroup a pids counter too, so it is
+// on only while a container is: dshns records (with this boot's id) that it was
+// the one to turn it on and turns it off again with the last container (see
+// cg_release). A +pids someone else wrote (Droidspaces never takes its own
+// back) is theirs and stays.
+static void pids_enable(void) {
+  char list[256], boot[64], mark[4096], had[64];
+  if (read_line(CG_HOST "/cgroup.controllers", list, sizeof(list)) < 0 || !has_controller(list, "pids"))
+    die("no pids controller on cgroup2: the kernel lacks CONFIG_CGROUP_PIDS, or a cgroup v1 hierarchy holds it");
+  boot_id(boot, sizeof(boot));
+  path_in(mark, sizeof(mark), opt.state, PIDS_MARK);
+  if (read_line(mark, had, sizeof(had)) == 0 && strcmp(had, boot) != 0)
+    unlink(mark);
+  if (read_line(CG_HOST "/cgroup.subtree_control", list, sizeof(list)) < 0)
+    die("cannot read " CG_HOST "/cgroup.subtree_control: %s", strerror(errno));
+  if (!has_controller(list, "pids")) {
+    if (write_file(CG_HOST "/cgroup.subtree_control", "+pids") < 0)
+      die("cannot enable pids in the root cgroup: %s", strerror(errno));
+    int fd = open_state(PIDS_MARK, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd >= 0) {
+      dprintf(fd, "%s\n", boot);
+      close(fd);
+    }
+  }
+  if (write_file(CG_ROOT "/cgroup.subtree_control", "+pids") < 0)
+    die("cannot enable pids in " CG_ROOT ": %s", strerror(errno));
+}
+
+// CG_ROOT once nothing is in it (it stays while another container runs), then
+// the root cgroup's pids if dshns turned it on this boot.
+static void cg_release(void) {
+  if (rmdir(CG_ROOT) < 0 && errno != ENOENT)
+    return;
+  char mark[4096], had[64], boot[64];
+  path_in(mark, sizeof(mark), opt.state, PIDS_MARK);
+  if (read_line(mark, had, sizeof(had)) < 0)
+    return;
+  boot_id(boot, sizeof(boot));
+  // EBUSY: someone else's cgroup below the root delegates pids now; theirs.
+  if (!strcmp(had, boot) && write_file(CG_HOST "/cgroup.subtree_control", "-pids") < 0 && errno != EBUSY)
+    say("cannot disable pids in the root cgroup: %s", strerror(errno));
+  unlink(mark);
+}
 
 static void cg_dir(char *buf, size_t size, const char *leaf) {
   snprintf(buf, size, CG_ROOT "/%s%s%s", opt.name, leaf ? "/" : "", leaf ? leaf : "");
@@ -288,26 +368,36 @@ static void cg_remove(const char *dir) {
   cg_rmdir_tree(dir);
 }
 
-// The monitor's cgroup and CG_ROOT, once nothing is in them (CG_ROOT stays
-// while another container runs).
+// The monitor's cgroup, then CG_ROOT (see cg_release).
 static void cg_tidy(void) {
   char dir[4096];
   snprintf(dir, sizeof(dir), CG_ROOT "/monitor-%s", opt.name);
   for (int i = 0; i < 20 && rmdir(dir) < 0 && errno == EBUSY; i++)
     usleep(50000);
-  rmdir(CG_ROOT);
+  cg_release();
 }
 
-// A fresh cgroup for this boot, delegated to the container's root: systemd
-// creates its slices below it.
+// A fresh cgroup for this boot, capped in PIDs and delegated to the container's
+// root: systemd creates its slices below it, and cannot raise the cap.
 static void cg_prepare(void) {
-  char dir[4096], path[4096];
+  char dir[4096], path[4096], value[32];
   if (mkdir(CG_ROOT, 0755) < 0 && errno != EEXIST)
     die("cannot create " CG_ROOT ": %s", strerror(errno));
+  pids_enable();
   cg_dir(dir, sizeof(dir), NULL);
   cg_remove(dir);
   if (mkdir(dir, 0755) < 0)
     die("cannot create %s: %s", dir, strerror(errno));
+  long limit = read_line("/proc/sys/kernel/pid_max", value, sizeof(value)) == 0 ? atol(value) / 2 : 0;
+  if (limit > PIDS_CAP)
+    limit = PIDS_CAP;
+  snprintf(value, sizeof(value), "%ld", limit);
+  path_in(path, sizeof(path), dir, "pids.max");
+  if (limit <= 0 || write_file(path, value) < 0) {
+    int saved = errno;
+    rmdir(dir);
+    die("cannot cap %s at %ld PIDs: %s", dir, limit, strerror(saved));
+  }
   const char *delegated[] = {"", "cgroup.procs", "cgroup.threads", "cgroup.subtree_control"};
   for (size_t i = 0; i < sizeof(delegated) / sizeof(delegated[0]); i++) {
     snprintf(path, sizeof(path), "%s%s%s", dir, delegated[i][0] ? "/" : "", delegated[i]);
@@ -487,7 +577,6 @@ static void child_fail(int booted, const char *what) {
 }
 
 static void child_network(void);
-static void fix_iptables_legacy(void);
 
 // PID 1 of the new namespaces. Waits for the monitor to write the uid maps and
 // move it into its cgroup, builds the root, then execs systemd.
@@ -542,7 +631,6 @@ static int container_main(void *arg) {
     child_fail(p->booted, "detach old root");
   rmdir("/.old_root");
   apply_ownership();
-  fix_iptables_legacy();
   if (opt.net)
     child_network();
   seccomp_guard();
@@ -597,7 +685,6 @@ static void private_rootfs(void) {
     say("rootfs stays nosuid: %s", strerror(errno));
 }
 
-static int open_state(const char *name, int flags);
 static pid_t spawn(int *console_sock);
 
 // Storage ------------------------------------------------------------------
@@ -843,6 +930,9 @@ static int open_state(const char *name, int flags) {
 // same uplink as the app. Without a matching uid rule, netd's default-network
 // rule (fwmark 0x0/0xffff) is used. The monitor re-checks every two seconds,
 // which also repairs whatever netd flushes.
+//
+// IPv6 is the same, on a ULA subnet NATed to the uplink's address: the rules,
+// the policy and the forwarding switch are made once per family.
 
 #define NET_BRIDGE "dsh-br0"
 #define NET_VETH "dsh-v0"
@@ -851,10 +941,29 @@ static int open_state(const char *name, int flags) {
 #define NET_IP "10.213.0.2"
 #define NET_PREFIX 16
 #define NET_SUBNET "10.213.0.0/16"
+#define NET6_GW "fd10:213::1"
+#define NET6_IP "fd10:213::2"
+#define NET6_PREFIX 64
+#define NET6_SUBNET "fd10:213::/64"
 #define NET_RULE_TO "6060"
 #define NET_RULE_FROM "6070"
 #define IP_BIN "/system/bin/ip"
 #define IPT_BIN "/system/bin/iptables"
+#define IP6T_BIN "/system/bin/ip6tables"
+
+struct family {
+  const char *label;    // in log lines
+  const char *ip;       // ip's family flag
+  const char *ipt;      // iptables or ip6tables
+  const char *subnet, *gw;
+  const char *forward;  // the forwarding switch
+  const char *orig;     // in the state dir: the switch before a container first turned it on
+};
+static const struct family NET_FAMILIES[] = {
+    {"", "-4", IPT_BIN, NET_SUBNET, NET_GW, "/proc/sys/net/ipv4/ip_forward", "ip_forward.orig"},
+    {"IPv6 ", "-6", IP6T_BIN, NET6_SUBNET, NET6_GW, "/proc/sys/net/ipv6/conf/all/forwarding", "ip6_forward.orig"},
+};
+#define NET_FAMILY_COUNT (sizeof(NET_FAMILIES) / sizeof(NET_FAMILIES[0]))
 
 // Runs a host tool with no output and returns its exit status (-1 if it did
 // not run at all). The platform's own ip/iptables, never a shell.
@@ -988,25 +1097,33 @@ static int lan_open(void) {
   return access(path, F_OK) == 0;
 }
 
-static void net_base_rules(void) {
-  write_file("/proc/sys/net/ipv4/ip_forward", "1");
-  char *m_chk[] = {IPT_BIN, "-w", "-t", "nat", "-C", "POSTROUTING", "-s", NET_SUBNET, "-j", "MASQUERADE", NULL};
-  char *m_add[] = {IPT_BIN, "-w", "-t", "nat", "-A", "POSTROUTING", "-s", NET_SUBNET, "-j", "MASQUERADE", NULL};
+// Turns forwarding on, again whenever netd turned it off (a hotspot stopping
+// does); only on a change: IPv6's switch walks every interface when written.
+static void forward_on(const struct family *f) {
+  char value[8];
+  if (read_line(f->forward, value, sizeof(value)) < 0 || strcmp(value, "1") != 0)
+    write_file(f->forward, "1");
+}
+
+static void net_base_rules(const struct family *f, int lan) {
+  char *ipt = (char *)f->ipt, *sub = (char *)f->subnet, *gw = (char *)f->gw;
+  forward_on(f);
+  char *m_chk[] = {ipt, "-w", "-t", "nat", "-C", "POSTROUTING", "-s", sub, "-j", "MASQUERADE", NULL};
+  char *m_add[] = {ipt, "-w", "-t", "nat", "-A", "POSTROUTING", "-s", sub, "-j", "MASQUERADE", NULL};
   ipt_ensure(m_chk, m_add);
-  char *fi_chk[] = {IPT_BIN, "-w", "-C", "FORWARD", "-i", NET_BRIDGE, "-j", "ACCEPT", NULL};
-  char *fi_add[] = {IPT_BIN, "-w", "-I", "FORWARD", "1", "-i", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  char *fi_chk[] = {ipt, "-w", "-C", "FORWARD", "-i", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  char *fi_add[] = {ipt, "-w", "-I", "FORWARD", "1", "-i", NET_BRIDGE, "-j", "ACCEPT", NULL};
   ipt_ensure(fi_chk, fi_add);
   // Into the container: replies only. With LAN access on, anything routed to
   // the subnet (hotspot clients, a LAN with a route to it) reaches its services.
-  int lan = lan_open();
-  char *open_chk[] = {IPT_BIN, "-w", "-C", "FORWARD", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
-  char *open_add[] = {IPT_BIN, "-w", "-I", "FORWARD", "1", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
-  char *open_del[] = {IPT_BIN, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
-  char *est_chk[] = {IPT_BIN, "-w", "-C", "FORWARD", "-o", NET_BRIDGE, "-m", "state", "--state", "ESTABLISHED,RELATED",
+  char *open_chk[] = {ipt, "-w", "-C", "FORWARD", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  char *open_add[] = {ipt, "-w", "-I", "FORWARD", "1", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  char *open_del[] = {ipt, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
+  char *est_chk[] = {ipt, "-w", "-C", "FORWARD", "-o", NET_BRIDGE, "-m", "state", "--state", "ESTABLISHED,RELATED",
                      "-j", "ACCEPT", NULL};
-  char *est_add[] = {IPT_BIN, "-w", "-I", "FORWARD", "1", "-o", NET_BRIDGE, "-m", "state", "--state",
+  char *est_add[] = {ipt, "-w", "-I", "FORWARD", "1", "-o", NET_BRIDGE, "-m", "state", "--state",
                      "ESTABLISHED,RELATED", "-j", "ACCEPT", NULL};
-  char *est_del[] = {IPT_BIN, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-m", "state", "--state", "ESTABLISHED,RELATED",
+  char *est_del[] = {ipt, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-m", "state", "--state", "ESTABLISHED,RELATED",
                      "-j", "ACCEPT", NULL};
   if (lan) {
     ipt_ensure(open_chk, open_add);
@@ -1015,20 +1132,14 @@ static void net_base_rules(void) {
     ipt_ensure(est_chk, est_add);
     ipt_remove(open_chk, open_del);
   }
-  static int shown = -1;
-  if (shown != lan) {
-    if (shown != -1 || lan)
-      say("[net] LAN access to the container %s", lan ? "on" : "off");
-    shown = lan;
-  }
   // The gateway address is the container's way to the app (the phone bridge
   // listens there): nothing else may reach it, whatever the LAN setting.
-  char *gw_chk[] = {IPT_BIN, "-w", "-C", "INPUT", "-d", NET_GW, "!", "-i", NET_BRIDGE, "-j", "DROP", NULL};
-  char *gw_add[] = {IPT_BIN, "-w", "-I", "INPUT", "1", "-d", NET_GW, "!", "-i", NET_BRIDGE, "-j", "DROP", NULL};
+  char *gw_chk[] = {ipt, "-w", "-C", "INPUT", "-d", gw, "!", "-i", NET_BRIDGE, "-j", "DROP", NULL};
+  char *gw_add[] = {ipt, "-w", "-I", "INPUT", "1", "-d", gw, "!", "-i", NET_BRIDGE, "-j", "DROP", NULL};
   ipt_ensure(gw_chk, gw_add);
-  char *mss_chk[] = {IPT_BIN, "-w", "-t", "mangle", "-C", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j",
+  char *mss_chk[] = {ipt, "-w", "-t", "mangle", "-C", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j",
                      "TCPMSS", "--clamp-mss-to-pmtu", NULL};
-  char *mss_add[] = {IPT_BIN, "-w", "-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j",
+  char *mss_add[] = {ipt, "-w", "-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j",
                      "TCPMSS", "--clamp-mss-to-pmtu", NULL};
   ipt_ensure(mss_chk, mss_add);
 }
@@ -1036,50 +1147,52 @@ static void net_base_rules(void) {
 // Android policy routing. Container packets enter from the bridge, so netd's
 // fwmark rules never match them: one rule selects the app's table for the
 // container's subnet, the other sends the way back through main.
-static void net_policy(void) {
+static void net_policy(const struct family *f) {
   char *buf = malloc(65536);
   if (!buf)
     return;
-  char *argv[] = {IP_BIN, "rule", NULL};
+  char *ip = (char *)f->ip, *sub = (char *)f->subnet;
+  char *argv[] = {IP_BIN, ip, "rule", NULL};
   if (capture(argv, buf, 65536) != 0) {
     free(buf);
     return;
   }
-  char table[64], want[80];
+  char table[64], want[80], to[80], from[80];
   app_table_from(buf, table, sizeof(table));
   int blocked = table[0] == '!';
   snprintf(want, sizeof(want), blocked ? "%s" : "lookup %s", blocked ? table + 1 : table);
+  snprintf(to, sizeof(to), "to %s", f->subnet);
+  snprintf(from, sizeof(from), "from %s", f->subnet);
   int have_to = 0, have_from = 0;
   char *save = NULL;
   for (char *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
-    if (!strncmp(line, NET_RULE_TO ":", strlen(NET_RULE_TO) + 1) && strstr(line, "to " NET_SUBNET) &&
-        strstr(line, "lookup main"))
+    if (!strncmp(line, NET_RULE_TO ":", strlen(NET_RULE_TO) + 1) && strstr(line, to) && strstr(line, "lookup main"))
       have_to = 1;
-    if (table[0] && !strncmp(line, NET_RULE_FROM ":", strlen(NET_RULE_FROM) + 1) &&
-        strstr(line, "from " NET_SUBNET) && strstr(line, want))
+    if (table[0] && !strncmp(line, NET_RULE_FROM ":", strlen(NET_RULE_FROM) + 1) && strstr(line, from) &&
+        strstr(line, want))
       have_from = 1;
   }
   free(buf);
   if (!have_to) {
-    char *del[] = {IP_BIN, "rule", "del", "pref", NET_RULE_TO, NULL};
+    char *del[] = {IP_BIN, ip, "rule", "del", "pref", NET_RULE_TO, NULL};
     run_quiet(del);
-    char *add[] = {IP_BIN, "rule", "add", "to", NET_SUBNET, "lookup", "main", "pref", NET_RULE_TO, NULL};
+    char *add[] = {IP_BIN, ip, "rule", "add", "to", sub, "lookup", "main", "pref", NET_RULE_TO, NULL};
     if (run_quiet(add) != 0)
       net_command_failed("ip rule add (host to container)");
   }
   if (!table[0])
     return;
   if (!have_from) {
-    char *del[] = {IP_BIN, "rule", "del", "pref", NET_RULE_FROM, NULL};
+    char *del[] = {IP_BIN, ip, "rule", "del", "pref", NET_RULE_FROM, NULL};
     run_quiet(del);
-    char *lookup[] = {IP_BIN, "rule", "add", "from", NET_SUBNET, "lookup", table, "pref", NET_RULE_FROM, NULL};
-    char *block[] = {IP_BIN, "rule", "add", "from", NET_SUBNET, table + 1, "pref", NET_RULE_FROM, NULL};
+    char *lookup[] = {IP_BIN, ip, "rule", "add", "from", sub, "lookup", table, "pref", NET_RULE_FROM, NULL};
+    char *block[] = {IP_BIN, ip, "rule", "add", "from", sub, table + 1, "pref", NET_RULE_FROM, NULL};
     if (run_quiet(blocked ? block : lookup) != 0)
       net_command_failed("ip rule add (container WAN)");
     else if (blocked)
-      say("[net] the app's own traffic is blocked (%s): so is the container's", table + 1);
+      say("[net] %sthe app's own traffic is blocked (%s): so is the container's", f->label, table + 1);
     else
-      say("[net] container traffic follows the app's table %s", table);
+      say("[net] %scontainer traffic follows the app's table %s", f->label, table);
   }
 }
 
@@ -1205,39 +1318,39 @@ static void relay_serve(int lfd, int port, int netns_fd, int alive) {
 }
 
 // netd's tether rules: a hotspot (or USB/Bluetooth tethering) runs and needs
-// IPv4 forwarding. Unknown counts as running.
-static int tethering(void) {
+// forwarding. Unknown counts as running.
+static int tethering(const struct family *f) {
   char buf[8192];
-  char *argv[] = {IPT_BIN, "-w", "-S", "tetherctrl_FORWARD", NULL};
+  char *argv[] = {(char *)f->ipt, "-w", "-S", "tetherctrl_FORWARD", NULL};
   if (capture(argv, buf, sizeof(buf)) != 0)
     return 1;
   return strstr(buf, " -i ") || strstr(buf, " -o ");
 }
 
-// ip_forward as it was before a container first turned it on, kept in the
-// state dir (a monitor that died leaves it for the next start's cleanup).
-static void forward_remember(void) {
+// The forwarding switch as it was before a container first turned it on, kept
+// in the state dir (a monitor that died leaves it for the next start's cleanup).
+static void forward_remember(const struct family *f) {
   char path[4096], value = '1';
-  path_in(path, sizeof(path), opt.state, "ip_forward.orig");
+  path_in(path, sizeof(path), opt.state, f->orig);
   if (access(path, F_OK) == 0)
     return;
-  int fd = open("/proc/sys/net/ipv4/ip_forward", O_RDONLY | O_CLOEXEC);
+  int fd = open(f->forward, O_RDONLY | O_CLOEXEC);
   if (fd >= 0) {
     if (read(fd, &value, 1) != 1)
       value = '1';
     close(fd);
   }
-  int out = open_state("ip_forward.orig", O_WRONLY | O_CREAT | O_TRUNC);
+  int out = open_state(f->orig, O_WRONLY | O_CREAT | O_TRUNC);
   if (out >= 0) {
     write(out, &value, 1);
     close(out);
   }
 }
 
-// Puts ip_forward back off if it was off, unless tethering needs it now.
-static void forward_restore(void) {
+// Puts the switch back off if it was off, unless tethering needs it now.
+static void forward_restore(const struct family *f) {
   char path[4096], value = '1';
-  path_in(path, sizeof(path), opt.state, "ip_forward.orig");
+  path_in(path, sizeof(path), opt.state, f->orig);
   int fd = open(path, O_RDONLY | O_CLOEXEC);
   if (fd < 0)
     return;
@@ -1247,44 +1360,55 @@ static void forward_restore(void) {
   unlink(path);
   if (value != '0')
     return;
-  if (tethering()) {
-    say("[net] tethering runs: ip_forward stays on");
+  if (tethering(f)) {
+    say("[net] tethering runs: %sforwarding stays on", f->label);
     return;
   }
-  write_file("/proc/sys/net/ipv4/ip_forward", "0");
+  write_file(f->forward, "0");
 }
 
 static void net_cleanup(void) {
-  char *m_del[] = {IPT_BIN, "-w", "-t", "nat", "-D", "POSTROUTING", "-s", NET_SUBNET, "-j", "MASQUERADE", NULL};
-  run_quiet(m_del);
-  char *fi_del[] = {IPT_BIN, "-w", "-D", "FORWARD", "-i", NET_BRIDGE, "-j", "ACCEPT", NULL};
-  run_quiet(fi_del);
-  char *fo_del[] = {IPT_BIN, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
-  run_quiet(fo_del);
-  char *est_del[] = {IPT_BIN, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-m", "state", "--state", "ESTABLISHED,RELATED",
-                     "-j", "ACCEPT", NULL};
-  run_quiet(est_del);
-  char *gw_del[] = {IPT_BIN, "-w", "-D", "INPUT", "-d", NET_GW, "!", "-i", NET_BRIDGE, "-j", "DROP", NULL};
-  run_quiet(gw_del);
-  char *mss_del[] = {IPT_BIN, "-w", "-t", "mangle", "-D", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j",
-                     "TCPMSS", "--clamp-mss-to-pmtu", NULL};
-  run_quiet(mss_del);
-  char *r1[] = {IP_BIN, "rule", "del", "pref", NET_RULE_TO, NULL};
-  run_quiet(r1);
-  char *r2[] = {IP_BIN, "rule", "del", "pref", NET_RULE_FROM, NULL};
-  run_quiet(r2);
+  for (size_t i = 0; i < NET_FAMILY_COUNT; i++) {
+    const struct family *f = &NET_FAMILIES[i];
+    char *ipt = (char *)f->ipt, *ip = (char *)f->ip, *sub = (char *)f->subnet, *gw = (char *)f->gw;
+    char *m_del[] = {ipt, "-w", "-t", "nat", "-D", "POSTROUTING", "-s", sub, "-j", "MASQUERADE", NULL};
+    run_quiet(m_del);
+    char *fi_del[] = {ipt, "-w", "-D", "FORWARD", "-i", NET_BRIDGE, "-j", "ACCEPT", NULL};
+    run_quiet(fi_del);
+    char *fo_del[] = {ipt, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-j", "ACCEPT", NULL};
+    run_quiet(fo_del);
+    char *est_del[] = {ipt, "-w", "-D", "FORWARD", "-o", NET_BRIDGE, "-m", "state", "--state", "ESTABLISHED,RELATED",
+                       "-j", "ACCEPT", NULL};
+    run_quiet(est_del);
+    char *gw_del[] = {ipt, "-w", "-D", "INPUT", "-d", gw, "!", "-i", NET_BRIDGE, "-j", "DROP", NULL};
+    run_quiet(gw_del);
+    char *mss_del[] = {ipt, "-w", "-t", "mangle", "-D", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j",
+                       "TCPMSS", "--clamp-mss-to-pmtu", NULL};
+    run_quiet(mss_del);
+    char *r1[] = {IP_BIN, ip, "rule", "del", "pref", NET_RULE_TO, NULL};
+    run_quiet(r1);
+    char *r2[] = {IP_BIN, ip, "rule", "del", "pref", NET_RULE_FROM, NULL};
+    run_quiet(r2);
+  }
+  // The bridge's IPv6 route is in main, not in the device's table (see net_setup).
+  char *rt6_del[] = {IP_BIN, "-6", "route", "del", NET6_SUBNET, "dev", NET_BRIDGE, "table", "main", NULL};
+  run_quiet(rt6_del);
   char *v_del[] = {IP_BIN, "link", "del", NET_VETH, NULL};
   run_quiet(v_del);
   char *b_del[] = {IP_BIN, "link", "del", NET_BRIDGE, NULL};
   run_quiet(b_del);
-  forward_restore();
+  for (size_t i = 0; i < NET_FAMILY_COUNT; i++)
+    forward_restore(&NET_FAMILIES[i]);
 }
+
+static void net_reconcile(void);
 
 // Removes the state of a previous run, then builds a fresh bridge and veth.
 // The child is waiting on its `go` pipe, so its netns exists and has no user.
 static int net_setup(pid_t init) {
   net_cleanup();
-  forward_remember();
+  for (size_t i = 0; i < NET_FAMILY_COUNT; i++)
+    forward_remember(&NET_FAMILIES[i]);
   char ns[64];
   snprintf(ns, sizeof(ns), "/proc/%d/ns/net", (int)init);
   char *br_add[] = {IP_BIN, "link", "add", NET_BRIDGE, "type", "bridge", NULL};
@@ -1296,8 +1420,20 @@ static int net_setup(pid_t init) {
   snprintf(gw, sizeof(gw), NET_GW "/%d", NET_PREFIX);
   char *br_ip[] = {IP_BIN, "addr", "add", gw, "dev", NET_BRIDGE, NULL};
   run_quiet(br_ip);
+  // Android puts a device's IPv6 prefix routes in a table of its own
+  // (accept_ra_rt_table), which the host-to-container rule does not look up:
+  // the route goes to main by hand, once the bridge is up (IPv6 refuses a
+  // route through a device that is down).
+  char gw6[64];
+  snprintf(gw6, sizeof(gw6), NET6_GW "/%d", NET6_PREFIX);
+  char *br_ip6[] = {IP_BIN, "-6", "addr", "add", gw6, "dev", NET_BRIDGE, "nodad", "noprefixroute", NULL};
+  if (run_quiet(br_ip6) != 0)
+    net_command_failed("ip -6 addr add " NET6_GW);
   char *br_up[] = {IP_BIN, "link", "set", NET_BRIDGE, "up", NULL};
   run_quiet(br_up);
+  char *br_rt6[] = {IP_BIN, "-6", "route", "add", NET6_SUBNET, "dev", NET_BRIDGE, "table", "main", NULL};
+  if (run_quiet(br_rt6) != 0)
+    net_command_failed("ip -6 route add " NET6_SUBNET);
   char *veth[] = {IP_BIN, "link", "add", NET_VETH, "type", "veth", "peer", "name", NET_PEER, "netns", ns, NULL};
   if (run_quiet(veth) != 0) {
     net_command_failed("ip link add " NET_VETH);
@@ -1308,55 +1444,26 @@ static int net_setup(pid_t init) {
   char *vup[] = {IP_BIN, "link", "set", NET_VETH, "up", NULL};
   run_quiet(vup);
   run_quiet(br_up);
-  net_base_rules();
-  net_policy();
-  say("[net] " NET_BRIDGE " " NET_GW "/%d <-> " NET_VETH ", netns of %d", NET_PREFIX, (int)init);
+  net_reconcile();
+  say("[net] " NET_BRIDGE " " NET_GW "/%d " NET6_GW "/%d <-> " NET_VETH ", netns of %d", NET_PREFIX, NET6_PREFIX,
+      (int)init);
   return 0;
 }
 
 static void net_reconcile(void) {
   if (!opt.net)
     return;
-  net_base_rules();
-  net_policy();
-}
-
-// The image's iptables alternatives point at nft, which this kernel does not
-// have; switch them to legacy once per rootfs. Runs as the container's root
-// after pivot_root, so every path here is the container's own. A new image
-// brings a rootfs without the marker and is fixed again.
-static void fix_iptables_legacy(void) {
-  static const char *const names[] = {"/etc/alternatives/iptables", "/etc/alternatives/ip6tables"};
-  static const char *const legacy[] = {"/usr/sbin/iptables-legacy", "/usr/sbin/ip6tables-legacy"};
-  const char *done = "/var/lib/dsh-go/iptables-legacy.done";
-  if (access(done, F_OK) == 0)
-    return;
-  int saw_legacy = 0, fixed = 0;
-  for (int i = 0; i < 2; i++) {
-    char target[256];
-    if (access(legacy[i], X_OK) != 0)
-      continue;
-    saw_legacy = 1;
-    ssize_t n = readlink(names[i], target, sizeof(target) - 1);
-    if (n <= 0)
-      continue;
-    target[n] = 0;
-    if (!strstr(target, "nft"))
-      continue;
-    if (unlink(names[i]) < 0 || symlink(legacy[i], names[i]) < 0) {
-      say("[net] cannot switch %s to legacy: %s", names[i], strerror(errno));
-      continue;
-    }
-    fixed++;
+  int lan = lan_open();
+  static int shown = -1;
+  if (shown != lan) {
+    if (shown != -1 || lan)
+      say("[net] LAN access to the container %s", lan ? "on" : "off");
+    shown = lan;
   }
-  if (!saw_legacy)
-    return;
-  mkdir_p("/var/lib/dsh-go", 0755);
-  int fd = open(done, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-  if (fd >= 0)
-    close(fd);
-  if (fixed > 0)
-    say("[net] iptables switched to the legacy backend (%d)", fixed);
+  for (size_t i = 0; i < NET_FAMILY_COUNT; i++) {
+    net_base_rules(&NET_FAMILIES[i], lan);
+    net_policy(&NET_FAMILIES[i]);
+  }
 }
 
 // Runs as PID 1 inside the container after pivot_root: the peer is already in
@@ -1378,9 +1485,13 @@ static void child_network(void) {
   char *route[] = {(char *)ipbin, "route", "add", "default", "via", NET_GW, NULL};
   if (run_quiet(route) != 0)
     say("[net] child: cannot add the default route");
+  char *addr6[] = {(char *)ipbin, "-6", "addr", "add", NET6_IP "/64", "dev", "eth0", "nodad", NULL};
+  char *route6[] = {(char *)ipbin, "-6", "route", "add", "default", "via", NET6_GW, "dev", "eth0", NULL};
+  if (run_quiet(addr6) != 0 || run_quiet(route6) != 0)
+    say("[net] child: no IPv6 on eth0");
   char *lo[] = {(char *)ipbin, "link", "set", "lo", "up", NULL};
   run_quiet(lo);
-  say("[net] child: eth0 " NET_IP "/16 via " NET_GW);
+  say("[net] child: eth0 " NET_IP "/16 via " NET_GW ", " NET6_IP "/64 via " NET6_GW);
 }
 
 
@@ -1674,7 +1785,7 @@ static int cmd_run(void) {
   char dir[4096];
   cg_dir(dir, sizeof(dir), NULL);
   cg_remove(dir);
-  rmdir(CG_ROOT);
+  cg_release();
   return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
 }
 

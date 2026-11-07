@@ -53,6 +53,7 @@ class SystemContainerTest {
         assertEquals(SystemContainer.signature("r15", args), SystemContainer.signature("r15", args, dockerTakeover = false))
         // A new daemon.json in an app update restarts the container, so Docker reads it.
         assertTrue(SystemContainer.signature("r15", args, dockerTakeover = true).contains("\"ip-forward-no-drop\": true"))
+        assertTrue(SystemContainer.signature("r15", args, dockerTakeover = true).contains("\"ip6tables\": true"))
     }
 
     @Test fun execWithAForwardMapsTheAppLoopbackPort() {

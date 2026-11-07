@@ -33,7 +33,7 @@ class GuestAgentsModeTest {
             assertFalse(system.contains("一定会被拒绝") || system.contains("danger-full-access") || system.contains("proot，免 Root"))
             assertTrue(system.contains("apt-get install -y <包名>`（需要联网）。装的软件只在系统容器里"))
             assertTrue(system.contains("\n- 不要执行 `reboot`"))
-            assertTrue(system.contains("\n- 容器工具：Docker") && system.contains("经 NAT 上网"))
+            assertTrue(system.contains("\n- 容器工具：Docker") && system.contains("经 NAT 上网") && system.contains("fd10:213::2") && system.contains("`podman build` 要加 `--network host`"))
             assertFalse(system.contains("共用网络") || system.contains("跑不起容器"))
             GuestSetup.writeAgentsMd(root, phoneStorage = false)
             assertEquals(proot, file.readText())

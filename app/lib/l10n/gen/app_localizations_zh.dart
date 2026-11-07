@@ -9808,7 +9808,7 @@ class L10nZh extends L10n {
 
   @override
   String get phoneSystemHint =>
-      '实验功能，默认关闭，下次启动生效，开启后优先于直接启动。需要 KernelSU 3.2.5 或 SukiSU 4.2.0 以上，并在 root 管理器里给 DSH Go 授予 root。引擎运行在以 systemd 为 1 号进程的 Ubuntu 系统容器里，数据库等服务可以用 systemctl 管理，Docker 和 Podman 的数据放在单独的存储里；容器有自己的网络（地址 10.213.0.2，经手机上网），容器里的 root 不能提权到整机。它和兼容启动是两套系统：/root 和 DSH 本身共用，apt 装的软件不共用。App 关闭或更新时容器继续运行。第一次启动会解压约 680 MB 的系统镜像。启动失败时自动改用直接启动或兼容启动。';
+      '实验功能，默认关闭，下次启动生效，开启后优先于直接启动。需要 KernelSU 3.2.5 或 SukiSU 4.2.0 以上，并在 root 管理器里给 DSH Go 授予 root；还需要补过容器所需选项的内核，原厂内核不行。引擎运行在以 systemd 为 1 号进程的 Ubuntu 系统容器里，数据库等服务可以用 systemctl 管理，Docker 和 Podman 的数据放在单独的存储里；容器有自己的网络（地址 10.213.0.2，经手机上网），容器里的 root 不能提权到整机。它和兼容启动是两套系统：/root 和 DSH 本身共用，apt 装的软件不共用。App 关闭或更新时容器继续运行。第一次启动会解压约 480 MB 的系统镜像。启动失败时自动改用直接启动或兼容启动。';
 
   @override
   String get phoneSystemFailedHint => '这台手机上系统容器启动没有成功，已改用直接启动或兼容启动。停止引擎后打开可再试一次。';
@@ -9862,22 +9862,13 @@ class L10nZh extends L10n {
   String get phoneSystemCheckOptionUnknown => '读不到内核配置，无法确认。';
 
   @override
-  String get phoneSystemCheckOffPids => '未开启：不能限制容器的进程数，不影响使用。';
+  String phoneSystemCheckOptionMissing(String options) {
+    return '未开启：$options。';
+  }
 
   @override
-  String get phoneSystemCheckOffNftables => '未开启：容器里用不了 nftables，防火墙规则请用 iptables-legacy。';
-
-  @override
-  String get phoneSystemCheckOffBridgeNetfilter => '未开启：Docker 默认网桥上的流量过滤不可用。';
-
-  @override
-  String get phoneSystemCheckOffAutofs => '未开启：systemd 的自动挂载不可用，镜像已屏蔽相关单元。';
-
-  @override
-  String get phoneSystemCheckOffCheckpoint => '未开启：CRIU 检查点和恢复不可用。';
-
-  @override
-  String get phoneSystemCheckPassedWarn => '可以开启。标黄的内核功能没有开启，相应的功能用不了。';
+  String get phoneSystemCheckPidsUnavailable =>
+      '内核已开启，但 cgroup2 上没有 pids 控制器（可能被 cgroup v1 的挂载占用了，比如 Droidspaces 的 v1 容器）。重启手机后再检查。';
 
   @override
   String get phoneSystemCheckFailed => '有要求没满足，不能开启系统容器启动。';
@@ -9913,7 +9904,7 @@ class L10nZh extends L10n {
   String get phoneSystemStartHint => 'systemd 会启动容器里的服务；App 关闭后容器继续运行。';
 
   @override
-  String get phoneSystemStartInstallHint => '第一次启动要先解压系统镜像（约 680 MB），需要一两分钟。';
+  String get phoneSystemStartInstallHint => '第一次启动要先解压系统镜像（约 480 MB），需要一两分钟。';
 
   @override
   String get phoneSystemStop => '停止容器';
@@ -9962,7 +9953,7 @@ class L10nZh extends L10n {
 
   @override
   String get phoneSystemDockerHint =>
-      '由 App 写入适合系统容器的 Docker 网络配置（bridge + legacy iptables），下次启动引擎时重启容器后生效。关掉时，这份配置如果没被改过就删除，改过的保留。';
+      '由 App 写入适合系统容器的 Docker 网络配置（默认网桥 + iptables），下次启动引擎时重启容器后生效。关掉时，这份配置如果没被改过就删除，改过的保留。';
 
   @override
   String get phoneSystemLanAccess => '局域网访问容器';

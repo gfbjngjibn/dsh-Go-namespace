@@ -9,7 +9,7 @@ import '../theme/app_icons.dart';
 import '../theme/semantic_colors.dart';
 
 /// Runs the system container's requirement check and lists each result. With
-/// [enabling], a passing check (warnings allowed) offers to turn the launch on
+/// [enabling], a passing check offers to turn the launch on
 /// and the sheet returns true; anything else returns false.
 Future<bool> showSystemCheckSheet(BuildContext context, {bool enabling = false}) async =>
     await showAppSheet<bool>(context, isScrollControlled: true, builder: (_) => SystemCheckSheet(enabling: enabling)) ??
@@ -46,8 +46,7 @@ class _SystemCheckSheetState extends ConsumerState<SystemCheckSheet> {
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final items = _items;
-    final passed = items != null && items.isNotEmpty && items.every((item) => item.ok || item.warn);
-    final warned = items != null && items.any((item) => !item.ok && item.warn);
+    final passed = items != null && items.isNotEmpty && items.every((item) => item.ok);
     return SafeArea(
       top: false,
       child: Column(
@@ -69,13 +68,7 @@ class _SystemCheckSheetState extends ConsumerState<SystemCheckSheet> {
                   ] else ...[
                     for (final item in items) _Row(item),
                     const SizedBox(height: 12),
-                    Text(
-                      passed
-                          ? warned
-                                ? l10n.phoneSystemCheckPassedWarn
-                                : l10n.phoneSystemCheckPassed
-                          : l10n.phoneSystemCheckFailed,
-                    ),
+                    Text(passed ? l10n.phoneSystemCheckPassed : l10n.phoneSystemCheckFailed),
                     if (widget.enabling && passed) ...[
                       const SizedBox(height: 16),
                       FilledButton(
@@ -134,14 +127,9 @@ class _Row extends StatelessWidget {
             _ => l10n.phoneSystemCheckKernelOk,
           }
         : switch (item.detail) {
-            'off' => switch (option) {
-              'CGROUP_PIDS' => l10n.phoneSystemCheckOffPids,
-              'NF_TABLES' => l10n.phoneSystemCheckOffNftables,
-              'BRIDGE_NETFILTER' => l10n.phoneSystemCheckOffBridgeNetfilter,
-              'AUTOFS_FS' => l10n.phoneSystemCheckOffAutofs,
-              'CHECKPOINT_RESTORE' => l10n.phoneSystemCheckOffCheckpoint,
-              _ => l10n.phoneSystemCheckOptionOff,
-            },
+            'off' when item.missing.isEmpty || item.missing.join() == option => l10n.phoneSystemCheckOptionOff,
+            'off' => l10n.phoneSystemCheckOptionMissing(item.missing.map((name) => 'CONFIG_$name').join(', ')),
+            'unavailable' => l10n.phoneSystemCheckPidsUnavailable,
             'unsupported' when option != null => l10n.phoneSystemCheckOptionUnknown,
             'unsupported' when item.key == 'cgroup2' => l10n.phoneSystemCheckCgroup2Missing,
             'missing' when item.key == 'launcher' => l10n.phoneSystemCheckLauncherMissing,
@@ -163,17 +151,9 @@ class _Row extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(
-            item.ok
-                ? AppIcons.success
-                : item.warn
-                ? AppIcons.warning
-                : AppIcons.failed,
+            item.ok ? AppIcons.success : AppIcons.failed,
             size: 20,
-            color: item.ok
-                ? colors.success
-                : item.warn
-                ? colors.warning
-                : colors.danger,
+            color: item.ok ? colors.success : colors.danger,
           ),
           const SizedBox(width: 12),
           Expanded(

@@ -71,14 +71,14 @@ object GuestSetup {
     // l10n:keep agent prompt
     private const val PROOT_ENVIRONMENT = "Ubuntu 24.04 环境里（proot，免 Root）。这里没有可用的沙箱后端（bubblewrap / Landlock 都不可用），`workspace-write` 沙箱模式一定会被拒绝。"
     // l10n:keep agent prompt
-    private const val SYSTEM_ENVIRONMENT = "Ubuntu 24.04 系统容器里（systemd 管理服务，可用 systemctl；容器内你是 root，宿主上只是本 App 的普通用户，不能提权；容器有自己的网络，经 NAT 上网，地址 10.213.0.2：手机上用这个地址访问容器里监听 0.0.0.0 的服务，局域网里的其他设备默认访问不到）。这里的沙箱可用（Landlock），`workspace-write` 等沙箱模式照常使用。"
+    private const val SYSTEM_ENVIRONMENT = "Ubuntu 24.04 系统容器里（systemd 管理服务，可用 systemctl；容器内你是 root，宿主上只是本 App 的普通用户，不能提权；容器有自己的网络，经 NAT 上网，地址 10.213.0.2：手机上用这个地址访问容器里监听 0.0.0.0 的服务，局域网里的其他设备默认访问不到；IPv6 地址是 fd10:213::2，也经 NAT，手机当前网络有 IPv6 时才能用 IPv6 上网）。这里的沙箱可用（Landlock），`workspace-write` 等沙箱模式照常使用。"
     // l10n:keep agent prompt
     private const val PROOT_SANDBOX_ADVICE = "- 需要执行 bash 命令时，直接用 `sandbox_permissions: \"danger-full-access\"` 申请运行，并用一句话写明理由；不要先试沙箱模式。\n"
     private const val APT_LINE_END = "`apt-get update && apt-get install -y <包名>`（需要联网）。"
     // l10n:keep agent prompt
     private const val SYSTEM_EXTRA = "装的软件只在系统容器里，用户换回兼容启动后就没有了。\n" +
         "- 不要执行 `reboot`、`poweroff`、`halt`、`systemctl isolate` 这类关机或切换目标的命令：会把容器连同引擎一起关掉，而且不会自己重新启动。\n" +
-        "- 容器工具：Docker（`apt-get install -y docker.io`）和 Podman（`apt-get install -y podman`）都能跑容器，镜像和数据在单独的存储里（空间不够时请用户在引擎页扩容）。默认网桥可用，`-p` 发布的端口在手机上用 `10.213.0.2:端口` 访问。Docker 的 `/etc/docker/daemon.json` 由 App 管理（引擎页「接管 Docker 配置」，每次启动容器时写入）；Docker 起不来或网络不通时，先请用户确认这个开关已打开，不要手改这个文件。"
+        "- 容器工具：Docker（`apt-get install -y docker.io`）和 Podman（`apt-get install -y podman`）都能跑容器，镜像和数据在单独的存储里（空间不够时请用户在引擎页扩容）。默认网桥可用（Docker 的默认网桥也有 IPv6），`-p` 发布的端口在手机上用 `10.213.0.2:端口` 访问。`podman build` 要加 `--network host`：容器里 Podman 构建时默认的网络用不了，RUN 那一步会失败（`docker build` 不用加）。Docker 的 `/etc/docker/daemon.json` 由 App 管理（引擎页「接管 Docker 配置」，每次启动容器时写入）；Docker 起不来或网络不通时，先请用户确认这个开关已打开，不要手改这个文件。"
 
     // l10n:keep agent prompt
     private val DIAGNOSTICS_SECTION = """

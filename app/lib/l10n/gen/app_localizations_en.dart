@@ -10327,7 +10327,7 @@ class L10nEn extends L10n {
 
   @override
   String get phoneSystemHint =>
-      'Experimental, off by default, applies from the next start and takes priority over direct launch. Needs KernelSU 3.2.5 or SukiSU 4.2.0 or later, with root granted to DSH Go in the root manager. The engine runs in an Ubuntu system container with systemd as PID 1, so services such as databases can be managed with systemctl, and Docker and Podman keep their data in a storage of their own. The container has a network of its own (address 10.213.0.2, online through the phone), and root inside it cannot get root on the phone. It is a separate system from compatible launch: /root and DSH itself are shared, software installed with apt is not. The container keeps running when the app is closed or updated. The first start unpacks a system image of about 680 MB. If the launch fails, direct or compatible launch is used instead.';
+      'Experimental, off by default, applies from the next start and takes priority over direct launch. Needs KernelSU 3.2.5 or SukiSU 4.2.0 or later, with root granted to DSH Go in the root manager, and a kernel patched with the options containers need: a stock kernel will not do. The engine runs in an Ubuntu system container with systemd as PID 1, so services such as databases can be managed with systemctl, and Docker and Podman keep their data in a storage of their own. The container has a network of its own (address 10.213.0.2, online through the phone), and root inside it cannot get root on the phone. It is a separate system from compatible launch: /root and DSH itself are shared, software installed with apt is not. The container keeps running when the app is closed or updated. The first start unpacks a system image of about 480 MB. If the launch fails, direct or compatible launch is used instead.';
 
   @override
   String get phoneSystemFailedHint =>
@@ -10383,25 +10383,13 @@ class L10nEn extends L10n {
   String get phoneSystemCheckOptionUnknown => 'The kernel configuration cannot be read.';
 
   @override
-  String get phoneSystemCheckOffPids =>
-      'Off: the container\'s process count cannot be limited; normal use is unaffected.';
+  String phoneSystemCheckOptionMissing(String options) {
+    return 'Off: $options.';
+  }
 
   @override
-  String get phoneSystemCheckOffNftables =>
-      'Off: no nftables in the container; use iptables-legacy for firewall rules.';
-
-  @override
-  String get phoneSystemCheckOffBridgeNetfilter => 'Off: no traffic filtering on Docker\'s default bridge.';
-
-  @override
-  String get phoneSystemCheckOffAutofs => 'Off: no systemd automounts; the image masks those units.';
-
-  @override
-  String get phoneSystemCheckOffCheckpoint => 'Off: no CRIU checkpoint and restore.';
-
-  @override
-  String get phoneSystemCheckPassedWarn =>
-      'Can be turned on. The kernel options marked yellow are off, so what they provide is unavailable.';
+  String get phoneSystemCheckPidsUnavailable =>
+      'Built in, but cgroup2 has no pids controller (a cgroup v1 mount may hold it, such as a Droidspaces v1 container). Restart the phone and check again.';
 
   @override
   String get phoneSystemCheckFailed =>
@@ -10440,7 +10428,7 @@ class L10nEn extends L10n {
 
   @override
   String get phoneSystemStartInstallHint =>
-      'The first start unpacks the system image (about 680 MB), which takes a minute or two.';
+      'The first start unpacks the system image (about 480 MB), which takes a minute or two.';
 
   @override
   String get phoneSystemStop => 'Stop container';
@@ -10491,7 +10479,7 @@ class L10nEn extends L10n {
 
   @override
   String get phoneSystemDockerHint =>
-      'The app writes a Docker network configuration for the system container (bridge + legacy iptables); it applies once the next engine start restarts the container. Turned off, the file is removed unless it was edited since.';
+      'The app writes a Docker network configuration for the system container (default bridge + iptables); it applies once the next engine start restarts the container. Turned off, the file is removed unless it was edited since.';
 
   @override
   String get phoneSystemLanAccess => 'LAN access to the container';

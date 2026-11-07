@@ -597,19 +597,21 @@ class SystemBackup {
 /// code, or the launcher's own failure line for the trial. A [warn] item that is
 /// not ok costs a feature, not the launch.
 class SystemCheckItem {
-  const SystemCheckItem({required this.key, required this.ok, this.detail, this.warn = false});
+  const SystemCheckItem({required this.key, required this.ok, this.detail, this.missing = const []});
 
   factory SystemCheckItem.fromMap(Map<Object?, Object?> map) => SystemCheckItem(
     key: map['key'] as String? ?? '',
     ok: map['ok'] == true,
     detail: map['detail'] as String?,
-    warn: map['warn'] == true,
+    missing: [for (final option in map['missing'] as List<Object?>? ?? const []) if (option is String) option],
   );
 
   final String key;
   final bool ok;
   final String? detail;
-  final bool warn;
+
+  /// For a `kconfig:` item that is off: the options (without `CONFIG_`) not built in.
+  final List<String> missing;
 }
 
 /// Dart side of the `dsh/runtime` platform channels implemented in Kotlin.

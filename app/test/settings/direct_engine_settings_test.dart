@@ -328,7 +328,7 @@ void main() {
     expect(bridge.changes, isEmpty);
   });
 
-  testWidgets('a failed requirement, unlike a warning, keeps the system container off', (tester) async {
+  testWidgets('a failed requirement keeps the system container off', (tester) async {
     final l10n = lookupL10n(AppLocale.zhCN);
     final bridge = _Bridge()
       ..systemCheck = const [
@@ -356,16 +356,16 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('system container switch needs an image and turns on through a check whose misses are warnings', (
-    tester,
-  ) async {
+  testWidgets('system container switch needs an image, and a kernel option that is off blocks it', (tester) async {
     final l10n = lookupL10n(AppLocale.zhCN);
     final runtime = _Runtime(const RuntimeStatus(phase: RuntimePhase.installed));
     final bridge = _Bridge()
       ..systemCheck = const [
         SystemCheckItem(key: 'root', ok: true),
         SystemCheckItem(key: 'cgroup2', ok: true),
-        SystemCheckItem(key: 'kconfig:NF_TABLES', ok: false, detail: 'off', warn: true),
+        SystemCheckItem(key: 'kconfig:NF_TABLES', ok: false, detail: 'off', missing: ['NFT_CT', 'NFT_FIB_INET']),
+        SystemCheckItem(key: 'kconfig:VXLAN', ok: false, detail: 'off', missing: ['VXLAN']),
+        SystemCheckItem(key: 'kconfig:CGROUP_PIDS', ok: false, detail: 'unavailable'),
       ];
     await show(tester, runtime, bridge);
     expect(find.text(l10n.phoneSystemEngine), findsNothing);
@@ -375,11 +375,14 @@ void main() {
     expect(find.text(l10n.phoneSystemEngine), findsOneWidget);
     await tester.tap(find.byType(Switch).last);
     await tester.pumpAndSettle();
-    expect(find.text(l10n.phoneSystemCheckOffNftables), findsOneWidget);
-    expect(find.text(l10n.phoneSystemCheckPassedWarn), findsOneWidget);
-    await tester.tap(find.byKey(const Key('system-check-enable')));
+    expect(find.text(l10n.phoneSystemCheckOptionMissing('CONFIG_NFT_CT, CONFIG_NFT_FIB_INET')), findsOneWidget);
+    expect(find.text(l10n.phoneSystemCheckOptionOff), findsOneWidget);
+    expect(find.text(l10n.phoneSystemCheckPidsUnavailable), findsOneWidget);
+    expect(find.text(l10n.phoneSystemCheckFailed), findsOneWidget);
+    expect(find.byKey(const Key('system-check-enable')), findsNothing);
+    await tester.tapAt(const Offset(10, 10));
     await tester.pumpAndSettle();
-    expect(bridge.systemChanges, [true]);
+    expect(bridge.systemChanges, isEmpty);
     expect(tester.takeException(), isNull);
   });
 }
