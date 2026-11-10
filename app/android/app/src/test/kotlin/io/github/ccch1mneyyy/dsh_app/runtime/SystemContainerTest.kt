@@ -79,13 +79,15 @@ class SystemContainerTest {
             "--cwd", "/root/workspace", "--") + guest, shellWords(command[4]))
     }
 
-    @Test fun anAppUpdateKeepsTheContainerButNewBindsOrRuntimeRestartIt() {
+    @Test fun anAppUpdateKeepsTheContainerButNewBindsRuntimeOrLauncherRestartIt() {
         fun args(lib: String, storage: List<String> = emptyList()) =
             SystemContainer.startArgs(SystemContainer.Layout(File("/data/user/0/app/files"), File(lib)), prootRootfs, storage, 10346, 10346, emptyList())
-        val before = SystemContainer.signature("r15", args("/data/app/~~a/lib/arm64"))
-        assertEquals(before, SystemContainer.signature("r15", args("/data/app/~~b/lib/arm64")))
-        assertNotEquals(before, SystemContainer.signature("r16", args("/data/app/~~a/lib/arm64")))
-        assertNotEquals(before, SystemContainer.signature("r15", args("/data/app/~~a/lib/arm64", listOf("/storage"))))
+        val before = SystemContainer.signature("r15", args("/data/app/~~a/lib/arm64"), launcher = "aa")
+        assertEquals(before, SystemContainer.signature("r15", args("/data/app/~~b/lib/arm64"), launcher = "aa"))
+        assertNotEquals(before, SystemContainer.signature("r16", args("/data/app/~~a/lib/arm64"), launcher = "aa"))
+        assertNotEquals(before, SystemContainer.signature("r15", args("/data/app/~~a/lib/arm64", listOf("/storage")), launcher = "aa"))
+        // A new dshns sets the container up differently (its /dev, /home).
+        assertNotEquals(before, SystemContainer.signature("r15", args("/data/app/~~a/lib/arm64"), launcher = "bb"))
     }
 
     @Test fun backupAndRestoreRunWithTheStorageAndOnlyTheUsersHome() {

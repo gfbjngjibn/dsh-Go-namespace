@@ -57,6 +57,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -69,6 +70,11 @@
 // The container's ceiling on PIDs (threads count too): half of pid_max, at most this.
 #define PIDS_CAP 65536
 #define OWNERSHIP "/var/lib/dsh-go/ownership.tsv"
+// The container storage's mount point in the rootfs, and /home's place on it.
+#define STORAGE_DIR "var/lib/dsh-go/storage"
+#define HOME_STORE "/" STORAGE_DIR "/home"
+// In the rootfs: /home has moved onto the storage (see home_on_storage).
+#define HOME_MOVED "/var/lib/dsh-go/home-on-storage"
 #define CONSOLE_CAP (1 << 20)
 // How long stop waits for a dead container's monitor to finish its teardown.
 #define TEARDOWN_WAIT_S 10
@@ -119,6 +125,8 @@ static void say(const char *fmt, ...) {
 // The write end of `start`'s ready pipe while the monitor sets up: a failure
 // there is also the caller's answer.
 static int ready_fd = -1;
+// What a failing `run` leaves behind for no one else to clear (its cgroups).
+static void (*on_die)(void);
 
 static void die(const char *fmt, ...) {
   va_list ap;
@@ -132,6 +140,8 @@ static void die(const char *fmt, ...) {
     vdprintf(ready_fd, fmt, ap);
     va_end(ap);
   }
+  if (on_die)
+    on_die();
   exit(EXIT_FAIL);
 }
 
@@ -162,6 +172,30 @@ static int mkdir_p(const char *path, mode_t mode) {
 
 static void path_in(char *buf, size_t size, const char *dir, const char *name) {
   snprintf(buf, size, "%s/%s", dir, name);
+}
+
+// Runs a program and returns its exit code. Its output goes to stderr: `run`'s
+// stdout is the caller's data (a backup).
+static int run_with(char *const argv[], char *const envp[]) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    dup2(2, 1);
+    execve(argv[0], argv, envp);
+    _exit(127);
+  }
+  int status;
+  if (pid < 0 || waitpid(pid, &status, 0) != pid)
+    return -1;
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+}
+
+// A host tool (mke2fs, e2fsck, resize2fs).
+static int run_tool(char *const argv[]) { return run_with(argv, environ); }
+
+// One of the guest's own programs, from its PID 1 before systemd.
+static int guest_tool(char *const argv[]) {
+  char *env[] = {"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", NULL};
+  return run_with(argv, env);
 }
 
 // Field 22 of /proc/PID/stat: tells a reused PID from the process we started.
@@ -472,21 +506,70 @@ static int bind_into(const char *host, const char *guest, int ro) {
   return ro ? remount_ro(target) : 0;
 }
 
+// Devices the container gets nodes of its own for. The host's belong to users
+// it cannot map (/dev/fuse is root's 0600, /dev/tun system:vpn 0660), so not
+// even its root could open them, and they stay as Android set them. The
+// monitor, real root, makes these on a tmpfs in its own namespace, outside the
+// rootfs (a mount made in the container's user namespace, like its /dev, is
+// nodev), owned by the container's root and open to all its users, as in an
+// unprivileged LXC container: a tun device can only be made in the
+// container's own netns, and a FUSE mount is seen only in the container.
+static const struct {
+  const char *name;
+  unsigned major, minor;
+} OWN_NODES[] = {{"fuse", 10, 229}, {"net/tun", 10, 200}};
+// That tmpfs, state/dev in the monitor's namespace; "" without one.
+static char own_dev[4096];
+
+static void make_nodes(void) {
+  path_in(own_dev, sizeof(own_dev), opt.state, "dev");
+  if ((mkdir(own_dev, 0755) < 0 && errno != EEXIST) || chown(own_dev, opt.uid, opt.gid) < 0 ||
+      mount("tmpfs", own_dev, "tmpfs", MS_NOSUID | MS_NOEXEC, "mode=755,size=16k") < 0) {
+    say("no device nodes of the container's own (%s: %s)", own_dev, strerror(errno));
+    own_dev[0] = 0;
+    return;
+  }
+  for (size_t i = 0; i < sizeof(OWN_NODES) / sizeof(OWN_NODES[0]); i++) {
+    char path[4096];
+    path_in(path, sizeof(path), own_dev, OWN_NODES[i].name);
+    char *slash = strrchr(path, '/');
+    *slash = 0;
+    mkdir(path, 0755);
+    *slash = '/';
+    if (mknod(path, S_IFCHR | 0666, makedev(OWN_NODES[i].major, OWN_NODES[i].minor)) < 0 || chmod(path, 0666) < 0 ||
+        chown(path, opt.uid, opt.gid) < 0) {
+      say("no /dev/%s in the container: %s", OWN_NODES[i].name, strerror(errno));
+      unlink(path);
+    }
+  }
+}
+
 // /dev for a rootless container: a tmpfs with the host's nodes bound in (the
-// guest cannot mknod), a private devpts, and a console whose master goes to
-// the monitor.
+// guest cannot mknod) and the monitor's own ones (make_nodes), a private
+// devpts, and a console whose master goes to the monitor.
 static int setup_dev(int console_sock) {
   if (do_mount("tmpfs", "dev", "tmpfs", MS_NOSUID | MS_NOEXEC, "mode=755,size=8m") < 0)
     return -1;
-  const char *nodes[] = {"null", "zero", "full", "random", "urandom", "tty", "fuse", "net/tun"};
+  const char *nodes[] = {"null", "zero", "full", "random", "urandom", "tty"};
   for (size_t i = 0; i < sizeof(nodes) / sizeof(nodes[0]); i++) {
     char host[64], guest[64];
     snprintf(host, sizeof(host), "/dev/%s", nodes[i]);
     snprintf(guest, sizeof(guest), "/dev/%s", nodes[i]);
     if (access(host, F_OK) != 0)
       continue;
-    if (bind_into(host, guest, 0) < 0 && i < 6)
+    if (bind_into(host, guest, 0) < 0)
       return -1;
+  }
+  // A node it cannot open would only fail with EACCES; without one, many
+  // programs find another way.
+  for (size_t i = 0; own_dev[0] && i < sizeof(OWN_NODES) / sizeof(OWN_NODES[0]); i++) {
+    char node[4096], guest[64];
+    path_in(node, sizeof(node), own_dev, OWN_NODES[i].name);
+    snprintf(guest, sizeof(guest), "/dev/%s", OWN_NODES[i].name);
+    if (access(node, F_OK) == 0 && bind_into(node, guest, 0) < 0) {
+      snprintf(node, sizeof(node), ".%s", guest);
+      unlink(node);
+    }
   }
   mkdir("dev/pts", 0755);
   if (do_mount("devpts", "dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "newinstance,gid=5,ptmxmode=0666,mode=0620") < 0 &&
@@ -563,17 +646,63 @@ static void apply_ownership(void) {
   say("first boot: set owner and mode of %d image entries", fixed);
 }
 
+// /home lives on the container storage, by Docker's and Podman's data: ext4,
+// where rootless Podman gets the kernel's own overlay. The first boot on a
+// storage without one moves the rootfs's /home there, as the container's root
+// and in its own paths; HOME_MOVED in the rootfs remembers that, so a storage
+// that lost its /home fails the start instead of booting an empty one.
+// Container PID 1, after pivot_root; NULL, or why there is no /home.
+static const char *home_on_storage(void) {
+  static char why[256];
+  struct stat st;
+  if (stat(HOME_STORE, &st) < 0) {
+    if (errno != ENOENT)
+      return snprintf(why, sizeof(why), "%s: %s", HOME_STORE, strerror(errno)), why;
+    if (access(HOME_MOVED, F_OK) == 0)
+      return "the container storage has lost /home: restore a backup, or delete the system container";
+    char *clear[] = {"/usr/bin/rm", "-rf", "--one-file-system", "--", HOME_STORE ".partial", NULL};
+    char *copy[] = {"/usr/bin/cp", "-a", "--", "/home", HOME_STORE ".partial", NULL};
+    int rc = guest_tool(clear);
+    if (rc == 0)
+      rc = guest_tool(copy);
+    if (rc != 0)
+      return snprintf(why, sizeof(why), "copying /home to the container storage failed (exit %d)", rc), why;
+    // The copy on the storage for good before the rename says it is whole (the
+    // journal may commit a rename ahead of data still in delayed allocation),
+    // and the rename before the original goes: they are two filesystems.
+    int fd = open(HOME_STORE ".partial", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0 || syscall(__NR_syncfs, fd) < 0 || rename(HOME_STORE ".partial", HOME_STORE) < 0 ||
+        syscall(__NR_syncfs, fd) < 0)
+      return snprintf(why, sizeof(why), "%s: %s", HOME_STORE, strerror(errno)), why;
+    close(fd);
+    char *drop[] = {"/usr/bin/rm", "-rf", "--one-file-system", "--", "/home", NULL};
+    if (guest_tool(drop) != 0)
+      say("the rootfs keeps its old /home, hidden below the storage's");
+    say("/home moved to the container storage");
+  }
+  if (touch(HOME_MOVED) < 0)
+    say("%s: %s", HOME_MOVED, strerror(errno));
+  mkdir("/home", 0755);
+  if (mount(HOME_STORE, "/home", NULL, MS_BIND, NULL) < 0)
+    return snprintf(why, sizeof(why), "bind /home: %s", strerror(errno)), why;
+  return NULL;
+}
+
 // start ---------------------------------------------------------------------
 
 struct child_pipes {
   int go, go_writer, booted, console;
 };
 
+static void child_abort(int booted, const char *msg) {
+  write(booted, msg, strlen(msg));
+  _exit(EXIT_FAIL);
+}
+
 static void child_fail(int booted, const char *what) {
   char msg[512];
   snprintf(msg, sizeof(msg), "%s: %s", what, strerror(errno));
-  write(booted, msg, strlen(msg));
-  _exit(EXIT_FAIL);
+  child_abort(booted, msg);
 }
 
 static void child_network(void);
@@ -631,9 +760,13 @@ static int container_main(void *arg) {
     child_fail(p->booted, "detach old root");
   rmdir("/.old_root");
   apply_ownership();
+  // Before running any of the guest's programs.
+  seccomp_guard();
+  const char *home = opt.storage ? home_on_storage() : NULL;
+  if (home)
+    child_abort(p->booted, home);
   if (opt.net)
     child_network();
-  seccomp_guard();
 
   char *env[] = {"container=dsh-go", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                  "TERM=linux", "HOME=/root", "LANG=C.UTF-8", NULL};
@@ -670,10 +803,11 @@ static int write_maps(pid_t pid) {
   return write_file(path, map);
 }
 
-// A mount namespace of the monitor's own, with the rootfs bound onto itself.
-// /data is nosuid; this bind is not, so the image's setuid programs (sudo, su)
-// work for the container's users. It is never visible outside: the host keeps
-// its nosuid /data, and the container's suid root is the app's uid here.
+// A mount namespace of the monitor's own, with the rootfs bound onto itself
+// and the container's device nodes (make_nodes). /data is nosuid; this bind
+// is not, so the image's setuid programs (sudo, su) work for the container's
+// users. It is never visible outside: the host keeps its nosuid /data, and the
+// container's suid root is the app's uid here.
 static void private_rootfs(void) {
   if (unshare(CLONE_NEWNS) < 0)
     die("mount namespace: %s", strerror(errno));
@@ -683,6 +817,7 @@ static void private_rootfs(void) {
     die("bind rootfs: %s", strerror(errno));
   if (mount(NULL, opt.rootfs, NULL, MS_REMOUNT | MS_BIND | MS_NODEV | MS_NOATIME, NULL) < 0)
     say("rootfs stays nosuid: %s", strerror(errno));
+  make_nodes();
 }
 
 static pid_t spawn(int *console_sock);
@@ -690,29 +825,14 @@ static pid_t spawn(int *console_sock);
 // Storage ------------------------------------------------------------------
 //
 // Docker and Podman need overlayfs, which refuses the app's /data (f2fs with
-// casefold), so their state lives on an ext4 image: sparse, created on first
+// casefold), so their state, and /home for rootless Podman's (see
+// home_on_storage), lives on an ext4 image: sparse, created on first
 // start, attached to a loop device that clears itself when the last mount
 // goes, mounted with discard so that what the container deletes is handed
 // back to /data. The mount is made in the monitor's namespace and copied into
 // the container's; nothing outside sees it.
 
-#define STORAGE_DIR "var/lib/dsh-go/storage"
 #define STORAGE_BLOCK 4096
-
-// Runs a host tool (mke2fs, e2fsck, resize2fs) and returns its exit code. Its
-// output goes to stderr: `run`'s stdout is the caller's data (a backup).
-static int run_tool(char *const argv[]) {
-  pid_t pid = fork();
-  if (pid == 0) {
-    dup2(2, 1);
-    execv(argv[0], argv);
-    _exit(127);
-  }
-  int status;
-  if (pid < 0 || waitpid(pid, &status, 0) != pid)
-    return -1;
-  return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-}
 
 // The filesystem's size in bytes from its superblock, or -1.
 static long long fs_bytes(int img) {
@@ -841,7 +961,8 @@ static void fd_path(char *buf, size_t size, int fd) { snprintf(buf, size, "/proc
 
 // Creates, checks, grows (after `dshns grow` while stopped) and mounts the
 // image, then binds its docker, containerd (Docker's image store) and
-// containers (Podman's) directories in. Monitor only.
+// containers (Podman's) directories in. Monitor only; /home is the
+// container's to bind (home_on_storage).
 static void storage_attach(void) {
   if (access(opt.storage, F_OK) != 0)
     storage_create();
@@ -1644,6 +1765,10 @@ static int cmd_start(void) {
     msg[n > 0 ? n : 0] = 0;
     if (strncmp(msg, "ok ", 3) != 0) {
       waitpid(m, NULL, 0);
+      // The monitor may have failed after making the container's cgroup.
+      char dir[4096];
+      cg_dir(dir, sizeof(dir), NULL);
+      cg_remove(dir);
       cg_tidy();
       die("container did not start: %s", msg[0] ? msg : "monitor exited");
     }
@@ -1684,6 +1809,8 @@ static int cmd_start(void) {
     close(state);
   }
   say("container init %d started (systemd)", init_pid);
+  // The caller may be gone (its su interrupted): the container keeps its monitor.
+  signal(SIGPIPE, SIG_IGN);
   dprintf(ready[1], "ok %d", init_pid);
   close(ready[1]);
   ready_fd = -1;
@@ -1754,10 +1881,20 @@ static pid_t spawn(int *console_sock) {
     msg[n] = 0;
     waitpid(init_pid, NULL, 0);
     cg_remove(dir);
+    if (opt.net)
+      net_cleanup();
     die("%s", msg);
   }
   *console_sock = console[0];
   return init_pid;
+}
+
+// `run`'s cgroup, then CG_ROOT and the root cgroup's pids (see cg_release).
+static void run_release(void) {
+  char dir[4096];
+  cg_dir(dir, sizeof(dir), NULL);
+  cg_remove(dir);
+  cg_release();
 }
 
 // A one-off command as the container's PID 1 instead of systemd, on the
@@ -1772,6 +1909,8 @@ static int cmd_run(void) {
   if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) < 0 || running_init())
     die("the container is running or busy: stop it first");
   ksu_guard();
+  // A run that fails on the way (the storage, the container's root) cleans up as one that ends.
+  on_die = run_release;
   cg_prepare();
   private_rootfs();
   if (opt.storage)
@@ -1782,10 +1921,7 @@ static int cmd_run(void) {
   int status = 0;
   while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
     ;
-  char dir[4096];
-  cg_dir(dir, sizeof(dir), NULL);
-  cg_remove(dir);
-  cg_release();
+  run_release();
   return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
 }
 

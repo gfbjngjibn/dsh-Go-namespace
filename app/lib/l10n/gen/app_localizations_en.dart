@@ -10327,7 +10327,7 @@ class L10nEn extends L10n {
 
   @override
   String get phoneSystemHint =>
-      'Experimental, off by default, applies from the next start and takes priority over direct launch. Needs KernelSU 3.2.5 or SukiSU 4.2.0 or later, with root granted to DSH Go in the root manager, and a kernel patched with the options containers need: a stock kernel will not do. The engine runs in an Ubuntu system container with systemd as PID 1, so services such as databases can be managed with systemctl, and Docker and Podman keep their data in a storage of their own. The container has a network of its own (address 10.213.0.2, online through the phone), and root inside it cannot get root on the phone. It is a separate system from compatible launch: /root and DSH itself are shared, software installed with apt is not. The container keeps running when the app is closed or updated. The first start unpacks a system image of about 480 MB. If the launch fails, direct or compatible launch is used instead.';
+      'Experimental, off by default, applies from the next start and takes priority over direct launch. Needs KernelSU 3.2.5 or SukiSU 4.2.0 or later, with root granted to DSH Go in the root manager, and a kernel patched with the options containers need: a stock kernel will not do. The engine runs in an Ubuntu system container with systemd as PID 1, so services such as databases can be managed with systemctl, and Docker\'s and Podman\'s data and /home are kept in a storage of their own. The container has a network of its own (address 10.213.0.2, online through the phone), and root inside it cannot get root on the phone. It is a separate system from compatible launch: /root and DSH itself are shared, software installed with apt is not. The container keeps running when the app is closed or updated. The first start unpacks a system image of about 480 MB. If the launch fails, direct or compatible launch is used instead.';
 
   @override
   String get phoneSystemFailedHint =>
@@ -10444,20 +10444,20 @@ class L10nEn extends L10n {
 
   @override
   String get phoneSystemDeleteHint =>
-      'Deletes the software and data installed in the container, Docker storage included; /root and DSH\'s data are kept.';
+      'Deletes the software and data installed in the container, the container storage (Docker, Podman and /home) included; /root and DSH\'s data are kept.';
 
   @override
   String get phoneSystemDeleteTitle => 'Delete the system container?';
 
   @override
   String get phoneSystemDeleteBody =>
-      'Software installed with apt, databases, Docker and Podman images and data, and every other file in the container are deleted. Chats, workspaces and settings in /root are kept. The next container start unpacks the image again.';
+      'Software installed with apt, databases, Docker and Podman images and data, /home, and every other file in the container are deleted. Chats, workspaces and settings in /root are kept. The next container start unpacks the image again.';
 
   @override
   String get phoneSystemActionFailed => 'That did not finish; see the engine log.';
 
   @override
-  String get phoneSystemStorage => 'Docker storage';
+  String get phoneSystemStorage => 'Container storage';
 
   @override
   String phoneSystemStorageValue(String used, String ceiling) {
@@ -10472,7 +10472,7 @@ class L10nEn extends L10n {
 
   @override
   String get phoneSystemGrowHint =>
-      'Raises the ceiling of Docker\'s and Podman\'s storage. It takes only what is written, and what is deleted goes back to the phone.';
+      'Raises the ceiling of the container storage, which Docker, Podman and /home share. It takes only what is written, and what is deleted goes back to the phone.';
 
   @override
   String get phoneSystemDockerTakeover => 'Take over Docker config';
@@ -10493,7 +10493,7 @@ class L10nEn extends L10n {
 
   @override
   String get phoneSystemBackupHint =>
-      'Stops the container, then packs the system, Docker storage and /root into Download/DSH-Go/backups. The backup holds your chats and API settings: keep it safe.';
+      'Stops the container, then packs the system, the container storage and /root into Download/DSH-Go/backups. The backup holds your chats and API settings: keep it safe.';
 
   @override
   String get phoneSystemBackupNeedsStorage => 'Backup and restore need Access phone files, turned on in Settings.';
@@ -10515,7 +10515,7 @@ class L10nEn extends L10n {
 
   @override
   String get phoneSystemRestoreBody =>
-      'The software, databases and Docker data in the system container are deleted and replaced by the backup\'s. Files in /root that the backup also has are overwritten.';
+      'The software, databases, /home and Docker data in the system container are deleted and replaced by the backup\'s. Files in /root that the backup also has are overwritten.';
 
   @override
   String get phoneSystemRestoreConfirm => 'Restore';

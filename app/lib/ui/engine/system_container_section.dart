@@ -28,7 +28,7 @@ String formatStorageBytes(int bytes) {
 }
 
 /// The system container (native SystemContainer), a daemon apart from the engine:
-/// its state, start / stop / delete, Docker storage, backup and restore, and
+/// its state, start / stop / delete, the container storage, backup and restore, and
 /// 「退出 DSH Go（含容器）」. Shown only when this build carries a system image.
 class SystemContainerSection extends ConsumerStatefulWidget {
   const SystemContainerSection({super.key});

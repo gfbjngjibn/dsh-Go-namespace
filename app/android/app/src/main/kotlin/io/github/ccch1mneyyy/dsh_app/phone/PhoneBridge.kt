@@ -171,6 +171,17 @@ class PhoneBridge(
         }
     }
 
+    /**
+     * The gateway's listener died with the container's network (the container restarted under
+     * a running bridge): [addTcp] binds the new one.
+     */
+    @Synchronized
+    private fun forgetBridge(s: ServerSocket) {
+        if (tcpBridge !== s) return
+        runCatching { s.close() }
+        tcpBridge = null
+    }
+
     /** [containerOnly]: the bridge gateway's socket, which serves the system container's subnet only. */
     private fun acceptTcp(s: ServerSocket, token: String, containerOnly: Boolean = false) {
         while (running) {
@@ -178,6 +189,7 @@ class PhoneBridge(
                 s.accept()
             } catch (e: Exception) {
                 if (running) log("[dsh-app] phone bridge: tcp accept failed: ${e.message}")
+                if (containerOnly) forgetBridge(s)
                 return
             }
             if (!running) {

@@ -265,7 +265,7 @@ class RuntimeController private constructor(private val app: Context) : DshProce
             SystemContainer.setLanAccess(app, lanAccess())
             val args = SystemContainer.startArgs(SystemContainer.layout(app), installer.rootfs, storage, android.os.Process.myUid(), android.system.Os.getgid(),
                 SystemContainer.supplementaryGroups())
-            SystemContainer.start(app, args, manifest.runtimeVersion, takeover) { log(it, "system") }
+            SystemContainer.start(app, args, manifest.runtimeVersion, image.launcher, takeover) { log(it, "system") }
         } finally {
             systemBusy = false
             emitStatus()

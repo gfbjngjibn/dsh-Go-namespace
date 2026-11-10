@@ -78,7 +78,9 @@ object GuestSetup {
     // l10n:keep agent prompt
     private const val SYSTEM_EXTRA = "装的软件只在系统容器里，用户换回兼容启动后就没有了。\n" +
         "- 不要执行 `reboot`、`poweroff`、`halt`、`systemctl isolate` 这类关机或切换目标的命令：会把容器连同引擎一起关掉，而且不会自己重新启动。\n" +
-        "- 容器工具：Docker（`apt-get install -y docker.io`）和 Podman（`apt-get install -y podman`）都能跑容器，镜像和数据在单独的存储里（空间不够时请用户在引擎页扩容）。默认网桥可用（Docker 的默认网桥也有 IPv6），`-p` 发布的端口在手机上用 `10.213.0.2:端口` 访问。`podman build` 要加 `--network host`：容器里 Podman 构建时默认的网络用不了，RUN 那一步会失败（`docker build` 不用加）。Docker 的 `/etc/docker/daemon.json` 由 App 管理（引擎页「接管 Docker 配置」，每次启动容器时写入）；Docker 起不来或网络不通时，先请用户确认这个开关已打开，不要手改这个文件。"
+        "- 容器工具：Docker（`apt-get install -y docker.io`）和 Podman（`apt-get install -y podman`）都能跑容器，镜像和数据在单独的存储里，`/home` 也在这块存储上（空间不够时请用户在引擎页扩容）。默认网桥可用（Docker 的默认网桥也有 IPv6），`-p` 发布的端口在手机上用 `10.213.0.2:端口` 访问。普通用户也能用 rootless Podman。Docker 的 `/etc/docker/daemon.json` 由 App 管理（引擎页「接管 Docker 配置」，每次启动容器时写入）；Docker 起不来或网络不通时，先请用户确认这个开关已打开，不要手改这个文件。\n" +
+        "- `/dev/fuse` 和 `/dev/net/tun` 可用：sshfs、squashfuse、AppImage 等 FUSE 程序能用（老式 AppImage 要先装 `libfuse2t64`），root 可以建 tun 接口（VPN 客户端要用）。\n" +
+        "- 某个程序拒绝以 root 运行时（比如 PostgreSQL 的 `initdb`、Chromium 的沙箱），用普通用户 `ubuntu` 跑它：`su - ubuntu -c '命令'`（主目录 `/home/ubuntu`，有免密 sudo）。`ubuntu` 进不了 `/root`（包括工作区）和 `/sdcard`：要用的文件先复制到 `/home/ubuntu`，结果再复制回工作区，用户在 App 里打不开 `/home` 下的文件。其他时候照常用 root。"
 
     // l10n:keep agent prompt
     private val DIAGNOSTICS_SECTION = """

@@ -18095,7 +18095,7 @@ abstract class L10n {
   /// No description provided for @phoneSystemHint.
   ///
   /// In zh, this message translates to:
-  /// **'实验功能，默认关闭，下次启动生效，开启后优先于直接启动。需要 KernelSU 3.2.5 或 SukiSU 4.2.0 以上，并在 root 管理器里给 DSH Go 授予 root；还需要补过容器所需选项的内核，原厂内核不行。引擎运行在以 systemd 为 1 号进程的 Ubuntu 系统容器里，数据库等服务可以用 systemctl 管理，Docker 和 Podman 的数据放在单独的存储里；容器有自己的网络（地址 10.213.0.2，经手机上网），容器里的 root 不能提权到整机。它和兼容启动是两套系统：/root 和 DSH 本身共用，apt 装的软件不共用。App 关闭或更新时容器继续运行。第一次启动会解压约 480 MB 的系统镜像。启动失败时自动改用直接启动或兼容启动。'**
+  /// **'实验功能，默认关闭，下次启动生效，开启后优先于直接启动。需要 KernelSU 3.2.5 或 SukiSU 4.2.0 以上，并在 root 管理器里给 DSH Go 授予 root；还需要补过容器所需选项的内核，原厂内核不行。引擎运行在以 systemd 为 1 号进程的 Ubuntu 系统容器里，数据库等服务可以用 systemctl 管理，Docker、Podman 的数据和 /home 放在单独的存储里；容器有自己的网络（地址 10.213.0.2，经手机上网），容器里的 root 不能提权到整机。它和兼容启动是两套系统：/root 和 DSH 本身共用，apt 装的软件不共用。App 关闭或更新时容器继续运行。第一次启动会解压约 480 MB 的系统镜像。启动失败时自动改用直接启动或兼容启动。'**
   String get phoneSystemHint;
 
   /// No description provided for @phoneSystemFailedHint.
@@ -18311,7 +18311,7 @@ abstract class L10n {
   /// No description provided for @phoneSystemDeleteHint.
   ///
   /// In zh, this message translates to:
-  /// **'删除容器里装的软件和数据，含 Docker 存储；/root 和 DSH 的数据保留。'**
+  /// **'删除容器里装的软件和数据，含容器存储（Docker、Podman 和 /home）；/root 和 DSH 的数据保留。'**
   String get phoneSystemDeleteHint;
 
   /// No description provided for @phoneSystemDeleteTitle.
@@ -18323,7 +18323,7 @@ abstract class L10n {
   /// No description provided for @phoneSystemDeleteBody.
   ///
   /// In zh, this message translates to:
-  /// **'容器里用 apt 装的软件、数据库、Docker 和 Podman 的镜像与数据，以及其他文件都会删除；/root 里的对话、工作区和设置保留。下次启动容器时会重新解压镜像。'**
+  /// **'容器里用 apt 装的软件、数据库、Docker 和 Podman 的镜像与数据、/home，以及其他文件都会删除；/root 里的对话、工作区和设置保留。下次启动容器时会重新解压镜像。'**
   String get phoneSystemDeleteBody;
 
   /// No description provided for @phoneSystemActionFailed.
@@ -18335,7 +18335,7 @@ abstract class L10n {
   /// No description provided for @phoneSystemStorage.
   ///
   /// In zh, this message translates to:
-  /// **'Docker 存储'**
+  /// **'容器存储'**
   String get phoneSystemStorage;
 
   /// No description provided for @phoneSystemStorageValue.
@@ -18359,7 +18359,7 @@ abstract class L10n {
   /// No description provided for @phoneSystemGrowHint.
   ///
   /// In zh, this message translates to:
-  /// **'提高 Docker 和 Podman 存储的上限。只占实际写入的空间，删掉的会还给手机。'**
+  /// **'提高容器存储的上限（Docker、Podman 和 /home 共用）。只占实际写入的空间，删掉的会还给手机。'**
   String get phoneSystemGrowHint;
 
   /// No description provided for @phoneSystemDockerTakeover.
@@ -18395,7 +18395,7 @@ abstract class L10n {
   /// No description provided for @phoneSystemBackupHint.
   ///
   /// In zh, this message translates to:
-  /// **'先停止容器，再把系统、Docker 存储和 /root 打包到 Download/DSH-Go/backups。备份里有对话和 API 配置，请妥善保管。'**
+  /// **'先停止容器，再把系统、容器存储和 /root 打包到 Download/DSH-Go/backups。备份里有对话和 API 配置，请妥善保管。'**
   String get phoneSystemBackupHint;
 
   /// No description provided for @phoneSystemBackupNeedsStorage.
@@ -18437,7 +18437,7 @@ abstract class L10n {
   /// No description provided for @phoneSystemRestoreBody.
   ///
   /// In zh, this message translates to:
-  /// **'当前系统容器里的软件、数据库和 Docker 数据会被删除，换成备份里的内容；/root 里备份中也有的文件会被覆盖。'**
+  /// **'当前系统容器里的软件、数据库、/home 和 Docker 数据会被删除，换成备份里的内容；/root 里备份中也有的文件会被覆盖。'**
   String get phoneSystemRestoreBody;
 
   /// No description provided for @phoneSystemRestoreConfirm.

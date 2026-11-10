@@ -44,8 +44,9 @@ object SystemContainer {
     /** The PRoot rootfs's /etc, read-only: the image's resolv.conf links to the one the app writes there. */
     private const val PROOT_ETC = "/run/dsh-go/proot-etc"
     /**
-     * Docker's and Podman's storage (dshns: an ext4 image, as overlayfs refuses /data): sparse,
-     * so only what is in it takes space; this is its ceiling, which [grow] raises.
+     * The container storage, Docker's and Podman's data and /home (dshns: an ext4 image, as
+     * overlayfs refuses /data): sparse, so only what is in it takes space; this is its ceiling,
+     * which [grow] raises.
      */
     const val STORAGE_SIZE = 32L shl 30
     /** [grow]'s step. */
@@ -56,8 +57,10 @@ object SystemContainer {
     private const val BACKUP_SUFFIX = ".tar.gz"
     /**
      * Run in the container's own view of users (so a backup survives the app's uid changing):
-     * the image, the storage and /root. Not /tmp, the API filesystems mounted for the run
-     * (tar would call them changed), nor what the runtime brings back by itself.
+     * the image, the storage and /root. What dshns binds from the storage (/home, /var/lib/docker
+     * and the like) is a mount `.` passes over: the storage brings it. Not /tmp, the API
+     * filesystems mounted for the run (tar would call them changed), nor what the runtime brings
+     * back by itself.
      */
     private const val BACKUP_SCRIPT = "set -o pipefail; cd / && tar --create --file=- --numeric-owner --xattrs " +
         "--xattrs-include='*' --acls --sparse --one-file-system --exclude=./proc --exclude=./sys --exclude=./dev " +
@@ -67,7 +70,9 @@ object SystemContainer {
     private const val RESTORE_SCRIPT = "set -o pipefail; cd / && gzip -dc | tar --extract --file=- --numeric-owner " +
         "--xattrs --xattrs-include='*' --acls --preserve-permissions --same-owner"
 
-    data class Image(val version: String, val asset: String, val sha256: String?, val bytes: Long, val uncompressedBytes: Long)
+    /** [launcher]: the sha256 of the dshns it was built with. */
+    data class Image(val version: String, val asset: String, val sha256: String?, val bytes: Long, val uncompressedBytes: Long,
+        val launcher: String? = null)
 
     /** [saved] is the user's choice; [failedRuntime] the runtime version it last failed to launch with. */
     data class Preference(val saved: Boolean, val failedRuntime: String?, val runtime: String?) {
@@ -109,7 +114,8 @@ object SystemContainer {
     fun bundled(context: Context): Image? = try {
         val json = JSONObject(context.assets.open(MANIFEST).bufferedReader().use { it.readText() })
         Image(json.getString("imageVersion"), json.getString("image"), json.optString("imageSha256").ifEmpty { null },
-            json.optLong("imageBytes", -1), json.optLong("uncompressedBytes", -1))
+            json.optLong("imageBytes", -1), json.optLong("uncompressedBytes", -1),
+            json.optJSONObject("launcher")?.optString("sha256")?.ifEmpty { null })
     } catch (_: FileNotFoundException) {
         null
     }
@@ -242,13 +248,15 @@ object SystemContainer {
 
     /**
      * Starts the container unless it runs (blocking, seconds). One started with other binds,
-     * or from another runtime, is shut down and started again: its mounts would still be the
-     * old ones. [runtime] is the runtime version the binds come from; [dockerTakeover] whether
-     * the app owns Docker's daemon.json, which Docker reads only when the container boots.
+     * from another runtime or by another launcher, is shut down and started again: its mounts
+     * would still be the old ones. [runtime] is the runtime version the binds come from;
+     * [launcher] the launcher's sha256 ([Image.launcher]); [dockerTakeover] whether the app
+     * owns Docker's daemon.json, which Docker reads only when the container boots.
      */
-    fun start(context: Context, args: List<String>, runtime: String, dockerTakeover: Boolean = false, log: (String) -> Unit) {
+    fun start(context: Context, args: List<String>, runtime: String, launcher: String?, dockerTakeover: Boolean = false,
+              log: (String) -> Unit) {
         val layout = layout(context)
-        val signature = signature(runtime, args, dockerTakeover)
+        val signature = signature(runtime, args, dockerTakeover, launcher)
         if (running(context)) {
             val was = runCatching { layout.started.readText() }.getOrNull()
             if (was == signature) return
@@ -341,12 +349,14 @@ object SystemContainer {
     }
 
     /**
-     * What a running container must have been started with to be kept: the runtime and the
+     * What a running container must have been started with to be kept: the runtime, the
+     * launcher's build ([launcher]: it sets up the container's mounts and devices) and the
      * start arguments, but not the launcher's path (an app update moves the native libraries,
      * and the container is no different for it), and the daemon.json the app owns, if any.
      */
-    fun signature(runtime: String, startArgs: List<String>, dockerTakeover: Boolean = false): String =
-        (listOf(runtime) + startArgs.drop(1) + if (dockerTakeover) listOf("docker-takeover", DOCKER_CONFIG) else emptyList()).joinToString("\n")
+    fun signature(runtime: String, startArgs: List<String>, dockerTakeover: Boolean = false, launcher: String? = null): String =
+        (listOf(runtime) + listOfNotNull(launcher) + startArgs.drop(1) +
+            if (dockerTakeover) listOf("docker-takeover", DOCKER_CONFIG) else emptyList()).joinToString("\n")
 
     /** Asks systemd to shut down, which dshns cuts short after [STOP_TIMEOUT_S]; blocking. */
     fun stop(context: Context, log: (String) -> Unit): Boolean {
