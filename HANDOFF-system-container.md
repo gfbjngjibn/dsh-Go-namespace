@@ -1,7 +1,7 @@
 # 交接：dsh-Go 本地引擎换容器（自用改造）
 
-> 2026-11-03 交接，同日第二、第三、第四个会话更新（第三个会话删掉了命名空间启动，加了 Docker/Podman 存储、备份恢复、卸载保护；第四个会话加了独立网络命名空间、Docker 默认网桥接管、宿主 loopback 中继和系统容器里的手机操控，见 §5b、§5c、§6b、§6c）。第五个会话审查并修正了第四个会话的改动，又按 App 里 agent 的自检结果改了提示词、Podman 默认网络、Docker 配置，修了容器重启的竞态（§5d、§5e、§6d、§6e）。前三个会话的改动是 `system-container` 上的 `09e4691`，第四、五个会话的改动是 `6e688aa`，之后修的中继泄漏（§5e）是 `1eaa590`，都已推送到 fork，本仓库不接受外部 PR，这是用户自用的改造。2026-11-05 定下补内核的方案（§9），那一轮没改代码；新内核 2026-11-07 刷进平板后，第六个会话按 §9 改完代码并在新内核上回归（见 §9 "本轮实现与验证"），2026-11-07 已提交并推送到 fork（`system-container` 分支上 `c512310` 之后的那个提交）。2026-11-07 新内核已刷进平板并通过真机检查，里面实际有哪些选项见 §9「新内核实际有什么」（没有 `CGROUP_DEVICE`、没有 ipvlan L3S 模式），可以开始做 §9 的下一轮代码改动。
-> 新会话先读本文，再读 `CLAUDE.md`。
+> 2026-11-03 交接，同日第二、第三、第四个会话更新（第三个会话删掉了命名空间启动，加了 Docker/Podman 存储、备份恢复、卸载保护；第四个会话加了独立网络命名空间、Docker 默认网桥接管、宿主 loopback 中继和系统容器里的手机操控，见 §5b、§5c、§6b、§6c）。第五个会话审查并修正了第四个会话的改动，又按 App 里 agent 的自检结果改了提示词、Podman 默认网络、Docker 配置，修了容器重启的竞态（§5d、§5e、§6d、§6e）。前三个会话的改动是 `system-container` 上的 `09e4691`，第四、五个会话的改动是 `6e688aa`，之后修的中继泄漏（§5e）是 `1eaa590`，都已推送到 fork，本仓库不接受外部 PR，这是用户自用的改造。2026-11-05 定下补内核的方案（§9），那一轮没改代码；新内核 2026-11-07 刷进平板后，第六个会话按 §9 改完代码并在新内核上回归（见 §9 "本轮实现与验证"），2026-11-07 已提交并推送到 fork（`66bb44e`）。2026-11-10 用户和 App 里的 agent 又聊了几轮（§10「背景」），定下了下一轮要做的事，**还没动代码**。
+> **新会话先读本文（尤其 §1、§2、§10），再读 `CLAUDE.md`。下一轮的任务、做法和验收全在 §10。**
 
 ## 1. 用户已经拍板的决定
 
@@ -15,6 +15,11 @@
   - **proot 和系统容器共用 `/root`**。
   - 容器以**守护进程运行**，App 被杀、更新都不影响它；同时要一个明显的「退出 DSH Go（含容器）」按钮（放在引擎页和常驻通知），先确认 → 停引擎 → 让 systemd 正常关机（超时约 60 s 强杀）→ 关 App。
   - **改为补内核**（2026-11-05 用户决定，取代原来的"不补内核、这几项算警告"）：系统容器只面向自己补过内核的设备，不考虑原厂内核；新补的内核选项按**必需项**检查，缺了不让启动（不学 Droidspaces 做成可选）。用户自己编新内核，下一轮代码等新内核到了再改，见 §9。仍不做内存/CPU 限制（Android 把这些控制器放在 cgroup v1 上，补内核也解决不了），不用 k8s。
+- **下一轮（2026-11-10 定，详见 §10）**：
+  - 容器里的 `/dev/net/tun` 和 `/dev/fuse` 改成由 monitor 自建、容器打得开的节点（用户："tun这个做法没什么问题"；FUSE 要"完整可用"，也照此做）。
+  - 用户目录 `/home` 放进现有的 ext4 存储镜像（和 Docker 共用一块，**不另挂一块**），rootless Podman 就能用内核原生的 overlay。
+  - 引擎页和常见问题里的「Docker 存储」改名为「容器存储」，相关文案一起改。
+  - 用户要求这几件事放到下一轮、在新对话里做，2026-11-10 这一轮只讨论、写交接。
 - 安全模型：App 已在 SukiSU 授权 root；容器里的进程必须带 KernelSU 的 no-new-privs 标志（`su --ksu-no-new-privs`，或启动器调 ioctl `_IO('K',21)`）。真机已验证：带标志后，容器内执行 su 和 GRANT_ROOT 都会被拒。第三个会话补测：`su --ksu-no-new-privs` 本身就有效；被拒时 su **仍会执行、退出码 0**，只是以 App 身份运行、能力位全 0，所以不能拿退出码判断（`dshns trial` 看 `id -u`）。dshns 的 start/exec/run/trial 自己也调 ioctl 21。
 
 ## 2. 环境与操作要点
@@ -36,7 +41,7 @@
   kill $H; rm -f $F
   ```
   不要用 `</dev/null`（命令会立刻被结束，退出码 143），也不要在 `su -c` 里套多层引号。
-- Git：这是用户自用的分叉，推到用户自己的 fork（公开）：远端 `fork` = https://github.com/gfbjngjibn/dsh-Go-namespace ，分支 `system-container`；`origin` 是上游，**绝不推送**。本仓库的 git 配置（只在本仓库）：`user.name gfbjngjibn`，`user.email 74477599+gfbjngjibn@users.noreply.github.com`（**不要用用户的真实邮箱**），`credential.helper` 是 Windows 的 Git Credential Manager。推送要在 Bash 沙箱外执行。只在用户要求时提交、推送；只暂存明确路径。第三个会话的全部工作是 `system-container` 上的一个提交 `09e4691`，第四、五个会话的是 `6e688aa` 和 `1eaa590`（中继泄漏），2026-11-03 都已推送。
+- Git：这是用户自用的分叉，推到用户自己的 fork（公开）：远端 `fork` = https://github.com/gfbjngjibn/dsh-Go-namespace ，分支 `system-container`；`origin` 是上游，**绝不推送**。本仓库的 git 配置（只在本仓库）：`user.name gfbjngjibn`，`user.email 74477599+gfbjngjibn@users.noreply.github.com`（**不要用用户的真实邮箱**），`credential.helper` 是 Windows 的 Git Credential Manager。推送要在 Bash 沙箱外执行。只在用户要求时提交、推送；只暂存明确路径。第三个会话的全部工作是 `system-container` 上的一个提交 `09e4691`，第四、五个会话的是 `6e688aa` 和 `1eaa590`（中继泄漏），2026-11-03 都已推送；交接文档的补记是 `c512310`；第六个会话（新内核那一轮）是 `66bb44e`，2026-11-07 已推送。之后（2026-11-10）只改了本文。
   - 第一次推送时带了用户的真实邮箱（提交 `30425e7`），已改成 noreply 并 force-push，但 GitHub 仍能按 SHA 查到这个旧提交。**用户决定不处理（2026-11-03："那个邮箱的事情不用管了"），不要再提起，也不要建议联系 GitHub Support 或删 fork**；新提交照样只用 noreply 邮箱。
 - 界面自动化：`uiautomator dump` 能拿到 Flutter 的语义节点（文字和坐标），比截图可靠；本会话的脚本在会话 scratchpad 里，没进仓库，需要时照着重写（dump → 按文字找 bounds → `input tap` 中心点）。
 - 测试：
@@ -323,8 +328,10 @@
 
 - **Docker 的接管是开关，默认打开**（第五个会话改的）：关着时 App 不写 `daemon.json`，也不恢复镜像里的旧配置（App 写过且没被改过的文件会删掉），默认网桥是否可用取决于当时文件里的内容——**关着时的 Docker 没测过**。开关只在下次启动引擎（容器重启）时生效。
 - ~~iptables 只能用 legacy、容器进程数没有上限、容器没有 IPv6~~：第六个会话随新内核解决（§9 "本轮实现与验证"）。
-- **`podman build` 的 RUN 步骤失败**（2026-11-07 发现，第五个会话去掉 `netns = "host"` 时引入）：容器在用户命名空间里，buildah 把自己当成 rootless，RUN 默认用 slirp4netns，而容器里没有 `/dev/net/tun`（`open("/dev/net/tun"): Permission denied`）；`--network bridge` 被拒（"cannot use networks as rootless"）。`--network host`、`--isolation chroot` 都能成功。`podman run` 不受影响，`docker build` 正常。**用户定的修法（2026-11-07）：不改环境，在提示词（`GuestSetup` 的 `SYSTEM_EXTRA`）和常见问题里写明 `podman build` 要加 `--network host`。**
+- **`podman build` 的 RUN 步骤失败**（2026-11-07 发现，第五个会话去掉 `netns = "host"` 时引入）：容器在用户命名空间里，buildah 把自己当成 rootless，RUN 默认用 slirp4netns，而容器里没有 `/dev/net/tun`（`open("/dev/net/tun"): Permission denied`）；`--network bridge` 被拒（"cannot use networks as rootless"）。`--network host`、`--isolation chroot` 都能成功。`podman run` 不受影响，`docker build` 正常。**用户定的修法（2026-11-07）：不改环境，在提示词（`GuestSetup` 的 `SYSTEM_EXTRA`）和常见问题里写明 `podman build` 要加 `--network host`。** 2026-11-10 查清根因是容器里的 `/dev/net/tun` 谁都打不开（§10），下一轮修好后去掉这句说明。
 - **Podman 容器的 1 号进程不理 SIGTERM 时，停容器会超时被强杀**：systemd 停 `libpod-*.scope` 最多等 90 秒（DefaultTimeoutStopSec），超过 dshns 的 60 秒，于是走 `cgroup.kill`（monitor 日志 "killed by signal 9"）。收尾照常、存储下次 `e2fsck` 是 clean，只是慢。2026-11-07 回归时由测试留下的 `podman run -d alpine sleep 300` 触发。
+- **容器里的 `/dev/fuse`、`/dev/net/tun` 打不开**（2026-11-10 实测，下一轮修，见 §10）：dshns 把宿主节点原样绑进来，属主在容器里映射不到。FUSE 程序（sshfs、rclone mount、AppImage、squashfuse）、rootless Podman（存储和网络）、`podman build` 的默认网络、容器里的 VPN 客户端都因此用不了。之前说过"AppImage 走 FUSE 已经能用"，是错的。
+- **Docker/Podman 的 `--device` 只支持同名映射**（2026-11-10 实测）：`--device /dev/null`、`--device /dev/fuse` 能用；`--device /dev/null:/dev/x` 这种改名映射，Docker 和 Podman（容器里两者都用 runc 1.3.4）都报 `error creating device nodes: mount src=/dev/x`：runc 在用户命名空间里不能 mknod，改为从宿主绑定节点，却拿容器里的路径当宿主路径。和 `CONFIG_CGROUP_DEVICE` 无关（cgroup2 的设备控制走 BPF，用户命名空间里 runc 本来就跳过设备控制），补那个选项也修不好。绕法：同名 `--device`，或 `-v /dev/a:/dev/b`。`--device-cgroup-rule` 正常。
 - **`/sys` 还是没重挂**（用户决定这一版不修），Docker 启动时会警告缺 `docker0/bridge/stp_state`、`brif/*/state`；不影响默认网桥。
 - **手机操控的 TCP 回退绑定在 `10.213.0.1`**（只对容器网段开放，见 §5d Q2）：abstract unix socket 是 netns 作用域的，容器里的 relay 连不到；App 的 fallback 因此在 loopback 之外再监听桥网关，relay 依次尝试 abstract → 127.0.0.1 → 10.213.0.1。这个监听对容器/宿主可达，仍有 32 字节 token；`/proc/net/tcp` 的 uid 校验对跨 netns 连接拿不到 uid（返回 null 放行），这是设计接受的弱化，和原来 loopback 回退一样。
 - **VPN 开关切换没实测**：策略规则在启动时按 App 当前的表（现在是 tun0）写入，monitor 每 2 秒重看；netd 清规则后会在 2 秒内补回。熄屏/切 VPN 的实际表现待测。
@@ -346,13 +353,15 @@
 
 ## 8. 建议的下一步
 
-0. §9 的代码改动已做完并在真机回归（2026-11-07，已提交）；`podman build` 按用户定的写进提示词和常见问题；热点不测（平板不能插卡，用户决定不管）（见 §9 "本轮实现与验证"）。
-1. 在系统容器里真正调一次手机操控（`mcp__phone__screen` 等），确认 token/uid/回退路径。
+0. **下一轮先做 §10**（tun/FUSE 节点、`/home` 放进容器存储、改名「容器存储」）。
+   - 上一轮：§9 的代码改动已做完并在真机回归（2026-11-07，已提交）；`podman build` 按用户定的写进提示词和常见问题；热点不测（平板不能插卡，用户决定不管）（见 §9 "本轮实现与验证"）。
+1. ~~在系统容器里真正调一次手机操控~~：2026-11-07 已测通（§7）。
 2. 测 VPN 开关、熄屏/Doze、后台：容器和引擎是否跟着 App 的网络表，netd 清理规则后 2 秒内是否补回。
 3. ~~重跑 `docker build`/`podman build`、备份 → 恢复~~：2026-11-07 已跑，`docker build` 和备份恢复正常，`podman build` 失败（§7）。
 4. 视需要支持容器内 `reboot`（monitor 看到 SIGHUP 时重新启动容器），以及容器状态的定期刷新。
 5. 第二期的收尾：把网络命名空间/Docker 接管/手机 bridge 的验证记录和已知问题继续补全。
 6. App 里 agent 在自检会话第 5–12 轮提的、核实后可以做的几项（用户还没定）：重挂 `/sys`（现在容器里看得到宿主全部网卡和 wlan0 的 MAC）、时区跟随手机（容器是 UTC）、日志上限（`daemon.json` 的 `log-opts`、journald 的 `SystemMaxUse`）、`/sdcard` 只读档。它提的"宿主写 cgroup 就能限内存""把宿主 `/dev/loop*` 绑进容器""`lazy_itable_init=0`"核实下来是错的或不该做。
+7. 2026-11-10 自检会话第 15–17 轮讨论过、用户还没定的方向（核实结论见 §10「还没定的方向」）：让 agent 以非 root 用户工作、给容器整体设内存上限、让容器里的 agent 能开发调试 Android App（adb 和工具链）。
 
 ## 9. 内核方案（2026-11-05 定，新内核 2026-11-07 已刷，代码已改并提交）
 
@@ -458,3 +467,148 @@
 - 平板上的容器（a9e6d2a742ed 解压的，仍带旧索引的那个）：删掉 `/var/lib/apt/lists/*` 后重新 update，拿到当天的索引，`xz-utils`/`liblzma5` 升回 `5.6.1+really5.4.5-1ubuntu0.4`；另有 15 个包可升级（镜像之后的正常更新，没动）。
 - **新镜像从头装又验证了一遍**（APK 11071546，用户要求"确保新装 App 状态下不会磕磕绊绊"）：删除系统容器后启动引擎，15 秒就绪，rootfs 是 `…2b194891b81e`，`/var/lib/apt/lists` 里 0 个文件；没 update 直接 `apt-get install` 报 "Unable to locate package"（正常，提示词要求先 update）；`apt-get update && apt-get install -y docker.io podman` 不加任何参数，56 秒装完，没有 404，`xz-utils`/`liblzma5` 直接是 `1ubuntu0.4`；iptables `nf_tables`，Docker 第一次就 active，running、0 个失败单元。Docker v4/v6 出网、`docker build`、`-p` 宿主经 v4/v6 访问，Podman 出网、`podman build --network host`、`-p` 都通（alpine 仍从 daocloud 拉，设备没挂代理时 Docker Hub 不通）。测试容器已删。
 - 平板当前：APK 11071546（重装后无障碍服务仍绑定着）；容器是 `…2b194891b81e` 从头装的，装了 docker.io 和 podman，Docker、Podman 各有一个 `alpine`；引擎在容器里（3080）；「局域网访问容器」关，Docker 接管开；`Download/DSH-Go/backups` 里有今天 14:46 的备份；对话列表里有 "Phone control test…" 对话。
+
+
+## 10. 下一轮：tun/FUSE 设备节点、`/home` 放进容器存储（2026-11-10 定，未动手）
+
+用户要求在**新对话**里做这一轮。本节是自包含的：背景、实测事实、决定、做法、文案、验收都在这里。代码位置以 `66bb44e` 为准。
+
+### 背景
+
+- 2026-11-07 到 11-10，用户在 App 的自检会话（`session-633a3c02`，"Runtime environment self-check with shell commands"）里又和 agent 聊了 5 轮（第 13–17 轮）。会话文件在平板上的 `files/runtime/rootfs/root/.dsh/sessions/--root-workspace--/session-633a3c02-…/session.v4.jsonl.zstd`，要用 `adb exec-out su -c cat` 拉下来再用 zstd 解压；agent 的回复在 `assistant/message` 行的 `data` 里，嵌套的 `{"type":"text","text":…}`。
+  - 第 13 轮：复查新内核下的环境，提示词里新写的说法都成立。
+  - 第 14 轮：用户说 `CONFIG_CGROUP_DEVICE` 不做了（开了会改动大量符号，修不过来）。
+  - 第 15 轮：离正常 Linux / agent 沙盒还差多少。
+  - 第 16 轮：目标定为"非 root 用户启动、能装包和用 Docker、能用大部分资源"。
+  - 第 17 轮：能不能"可以 adb，但不能 adb shell su"。
+- 核对 agent 说法时实测出本节的问题；agent 说错的地方见本节「还没定的方向」和 §7。
+
+### 实测事实（2026-11-10，APK 11071546，新内核，镜像 `…2b194891b81e`）
+
+- **两个设备节点打不开**：`setup_dev()`（`dshns.c` 里 `nodes[] = {"null", …, "fuse", "net/tun"}`）把宿主节点原样绑进容器的 `/dev`。
+  - 宿主上 `/dev/fuse` 是 `root:root 0600`（`u:object_r:fuse_device:s0`），`/dev/net/tun` 是指向 `../tun` 的软链接，`/dev/tun` 是 `system:vpn 0660`（`tun_device`）。
+  - 属主在容器里映射不到（显示为 nobody/nogroup），所以容器 root 也打不开：`exec 3<>/dev/fuse`、`/dev/net/tun` 都失败，`/dev/null` 能打开。
+  - 容器的 `/dev` 是容器进程自己挂的 tmpfs（`uid=10346`，带 nosuid、noexec）。
+- **受影响的**：
+  - `podman build` 默认的 RUN 网络：slirp4netns 报 `open("/dev/net/tun"): Permission denied`。
+  - rootless Podman（以 ubuntu 用户、`XDG_RUNTIME_DIR` 指向自建目录来测）：
+    - 默认存储：`fuse: failed to open /dev/fuse: Permission denied`，连 `--network none` 都跑不起来。home 在 `/data` 的 f2fs 上，f2fs 开了 casefold，overlay 不能用，Podman 退回 fuse-overlayfs。
+    - vfs 存储：`--network none` ✅；默认网络 ❌（slirp4netns 同上）；`--network host` ✅ 能出网；`podman build --network host` ❌ `while running runtime: exit status 1`，原因没查。
+    - 测完已执行 `podman system reset` 并删掉 `~/.local/share/containers`。
+  - FUSE 程序（sshfs、rclone mount、squashfuse、AppImage）、容器里的 VPN 客户端都用不了。
+- **前提条件都在**：
+  - 内核：`CONFIG_FUSE_FS=y`、`CONFIG_FUSE_PASSTHROUGH=y`、`CONFIG_VIRTIO_FS=y`。
+  - 镜像：带 `fuse3`、`/usr/bin/fusermount3`（`fusermount` 是指向它的软链接）、`/etc/fuse.conf`。setuid 位按 `ownership.tsv` 在首次启动时恢复，rootfs 的 nosuid 已被 monitor 去掉（sudo 能用就是证明）。
+  - seccomp 只拦 KernelSU 的提权调用；容器进程在 ksu 域，该域是 permissive。
+- **`/dev/null` 能打开**：说明"把宿主侧建好的节点绑进容器"这条路可行，只要节点所在的文件系统不是在容器的用户命名空间里挂的（那样会被内核当作 nodev），也不在 `/data`（挂载时带 nodev）上。
+- **`--device`**：只支持同名映射，与 `CGROUP_DEVICE` 无关（§7）。
+
+### 决定
+
+1. **tun**：照下面的做法改（用户："tun这个做法没什么问题"）。
+2. **FUSE**：要完整可用，做法和 tun 一样，一起做。
+3. **`/home`**：放进现有的 32 GB ext4 存储镜像，和 Docker、containerd、containers 共用一块，**不另挂一块**（用户："用户目录单挂ext4…和docker那个合并"）。rootless Podman 因此能用内核原生的 overlay，fuse-overlayfs 只是后备。
+4. **改名**：「Docker 存储」改成「容器存储」，相关文案一起改（下面「文案」）。
+5. **`/root` 不动**：它和兼容启动共用，仍是 proot rootfs 的绑定。
+
+### 做法
+
+#### 1. 设备节点（`dshns.c`）
+
+- **建节点**：由 monitor 来建，它在宿主上是真 root，而且在 `private_rootfs()` 之后已有自己私有的挂载命名空间。
+  - 在一个只有 monitor 和容器子进程看得见的地方挂一块很小的 tmpfs，挂载时**不要**带 `MS_NODEV`。位置放在 rootfs 之外，pivot_root 之后容器就看不到；例如 state 目录下的子目录：state 在 `/data` 上，但新挂的 tmpfs 用的是自己的挂载标志，不继承 `/data` 的 nodev。实现时要验证节点确实能打开。
+  - 在里面 `mknod`：`fuse` 为 `c 10 229`，`net/tun` 为 `c 10 200`，权限 0666，属主 `opt.uid:opt.gid`（即容器 root）。
+- **绑节点**：`setup_dev()` 绑定 `fuse`、`net/tun` 时，改成绑这两个自建节点，不再绑宿主的。宿主上原有的节点**不要 chmod、chown**，否则会改变 Android 的状态。
+- **失败处理**：建节点失败时只记一行日志，容器里就不出现这个节点，不要再退回去绑那个打不开的宿主节点。节点不存在时，不少程序会自己换办法；存在却打不开，只会报权限错误。
+- **两条启动路径都要有**：`start` 和 `run`（备份/恢复）都经过 `spawn()` → `container_main()` → `setup_dev()`。tmpfs 随 monitor 的挂载命名空间一起消失，不用清理。
+- **安全**：
+  - 容器里任何用户都能开 tun，但 tun 只能建在容器自己的网络命名空间里（建接口需要该网络命名空间所属用户命名空间里的 `CAP_NET_ADMIN`）。
+  - 任何用户都能经 setuid 的 `fusermount3` 挂 FUSE，挂载只在容器里可见。
+  - 这和 LXC 无特权容器的常见配置一样。代价是容器能碰到更多 FUSE 内核代码；卡住的 FUSE 进程会让访问它挂载点的进程挂起，但影响只在容器内。
+
+#### 2. `/home` 放进容器存储（`dshns.c`）
+
+- **现状**：`storage_attach()` 在 monitor 里把存储挂到 `var/lib/dsh-go/storage`，再把子目录 `docker`、`containerd`、`containers` 绑到 `var/lib/…`（用 `open_in`、`dir_in`，`RESOLVE_IN_ROOT`，不跟随软链接，见 §5d R1）。任何一步失败都 `die`，启动直接失败。所以 `/home` 放进去之后，不会出现带着空 `/home` 启动的情况，这一点要保持。
+- **加 `home`**：在存储里加子目录 `home`，绑到 `/home`。
+- **首次搬迁**：存储里还没有 `home` 时，要先把 rootfs 现有的 `/home` 搬过去，再绑。镜像自带 `/home/ubuntu`（skel 文件），老容器里可能还有用户文件。
+  - 建议在容器里做（pid 1，pivot 之后、exec systemd 之前，和 `apply_ownership()` 同一时机），以容器 root 身份进行，路径都是容器自己的。可以 fork 执行容器里的 `cp -a --preserve=all /home/. <存储>/home/`，或者自己实现复制；复制完写一个标记，再 bind。
+  - 如果在 monitor 里以宿主 root 复制，就要处理 rootfs 里的软链接（R1 的问题）。
+  - 这样的话，`/home` 的绑定也挪到容器里做，monitor 只负责建好存储里的目录。这是建议的分工，实现时可以再权衡。
+- **备份/恢复**：
+  - 现在的打包方式是先 `--one-file-system` 打 `.`，再单独打 `./var/lib/dsh-go/storage`（`SystemContainer.BACKUP_SCRIPT`）。`/home` 绑在存储上之后，打 `.` 时会被跳过，存储那部分会把它带上，不会丢、也不会重复。
+  - 要实测三件事：新格式备份能恢复；**旧格式备份**（`/home` 还在 rootfs 里的）恢复到新版本后，`/home` 的内容在、属主对；恢复后再启动不会重复搬迁。
+- **扩容和删除**：`grow`、删除容器不用改：`/home` 的内容随存储一起扩容、一起删除。和以前一样，删除容器本来就会删掉 rootfs 里的 `/home`，只是以前没写出来，这次文案里要写明。
+- **rootless Podman**：home 在 ext4 上以后，`podman info` 里应该是 `overlay`，而且原生 overlay 生效（如 "Native Overlay Diff: true"）。内核 6.12 支持在用户命名空间里挂 overlay；配合 tun 节点，pasta/slirp4netns 的默认网络也应该能通。都要实测。
+  - 没有用户级 systemd 会话时会有警告，可选择执行 `loginctl enable-linger ubuntu`。这不在本轮范围。
+
+#### 3. 提示词、常见问题、测试
+
+- **`GuestSetup.kt`**（`SYSTEM_EXTRA`）：
+  - 在"镜像和数据在单独的存储里"后补上"`/home` 也在这块存储上，空间不够时请用户在引擎页扩容"。
+  - 默认的 `podman build` 实测通过后，删掉"`podman build` 要加 `--network host`…"那句；rootless Podman 和 FUSE 实测可用后，再各补一句。
+  - `GuestAgentsModeTest` 里有对 `--network host` 那句的断言，要跟着改。
+- **常见问题**：`docs/guide/{zh,en}/11-faq.md` 改完后，跑 `python3 app/tool/guide_sync.py` 同步到手册技能。
+
+### 文案（`app/lib/l10n/parts/phone_{zh,en}.arb`，改完跑 `python3 app/tool/l10n_merge.py`）
+
+| 键 | 现在（中文） | 改成 |
+|---|---|---|
+| `phoneSystemStorage` | Docker 存储 | 容器存储（Container storage） |
+| `phoneSystemGrowHint` | 提高 Docker 和 Podman 存储的上限。… | 提高容器存储的上限（Docker、Podman 和 /home 共用）。… |
+| `phoneSystemDeleteHint` | …含 Docker 存储；/root 和 DSH 的数据保留。 | …含容器存储（Docker、Podman 和 /home）；/root 和 DSH 的数据保留。 |
+| `phoneSystemBackupHint` | 把系统、Docker 存储和 /root 打包… | 把系统、容器存储和 /root 打包… |
+| `phoneSystemRestoreBody` | 软件、数据库和 Docker 数据会被删除… | 软件、数据库、/home 和 Docker 数据会被删除… |
+| `phoneSystemHint` | Docker 和 Podman 的数据放在单独的存储里 | Docker、Podman 的数据和 /home 放在单独的存储里 |
+
+英文的键同步改（`Docker storage` → `Container storage` 等）。常见问题里要改：
+
+- 存储那条：改成"Docker、Podman 的数据和用户目录 `/home` 放在单独的容器存储里…"，并补一句"`/root` 不在里面，它和兼容启动共用"。
+- 备份那条："Docker 存储" → "容器存储"。
+- 删除那条："软件和 Docker 数据" → "软件、`/home` 和 Docker 数据"。
+
+### 验收（真机，新内核）
+
+1. **节点**：容器 root 能打开 `/dev/net/tun`、`/dev/fuse`；宿主上 `/dev/fuse`、`/dev/tun` 的属主和权限没变。
+2. **构建**：`podman build` 不加参数能过 RUN 那一步；`docker build` 照常。
+3. **FUSE**：
+   - 容器 root 挂 sshfs（比如连容器自己的 sshd）；
+   - 普通用户经 `fusermount3` 挂、卸；
+   - squashfuse 挂一个镜像；
+   - 跑一个 AppImage（老式的需要 `apt install libfuse2t64`）。
+4. **rootless Podman**（ubuntu 用户）：
+   - `podman info` 是原生 overlay；
+   - `podman run` 默认网络能出网；
+   - `-p` 能访问；
+   - `podman build` 能过（之前 vfs 下 `exit status 1` 的原因若仍在，要查）；
+   - 强制用 fuse-overlayfs 也能跑。
+5. **`/home`**：
+   - 老容器升级后，内容、属主、权限、setuid/xattr 都对，只搬一次；
+   - 新装的容器里 `/home/ubuntu` 有 skel 文件；
+   - 引擎页"容器存储"的用量包含 `/home`；
+   - 存储故意弄坏时启动失败，不会带着空 `/home` 起来。
+6. **备份/恢复**：新格式能恢复；旧格式（`/home` 在 rootfs 里）恢复到新版本后正常；恢复后启动不重复搬迁。
+7. **回归**：引擎、手机操控 relay、Docker/Podman 的 v4/v6、`-p`、局域网开关、pids 上限都正常；停容器后宿主恢复原样（§9 本轮验证里列的那几项）。
+8. **测试与检查**：Kotlin 单元测试、`flutter analyze`、相关 Dart 测试、`l10n_merge.py --check`、`guide_sync.py --check`、dshns `-Werror`。
+
+### 不要做的
+
+- 不要 chmod、chown 宿主的 `/dev/fuse`、`/dev/tun`；不要把宿主的 `/dev/loop*`、`/dev/block` 绑进容器。
+- 不要为了 `--device` 去补 `CGROUP_DEVICE`（§7）。
+- 不要把 `/root` 挪进存储。
+
+### 还没定的方向（第 15–17 轮讨论，核实后的结论，留给用户决定）
+
+- **内存/CPU 限制**：agent 两次说"内核都有，只差宿主写 `subtree_control` 委派"，这是**错的**。Android 把 memory、cpu、cpuset 都挂在 cgroup v1 上（`/dev/memcg`、`/dev/cpuctl`），cgroup2 的 `cgroup.controllers` 里只有 pids（§4）。`docker --memory`、`--cpus` 要改 Android 的 cgroup 布局才可能生效。可行的是另一件事：dshns 在 v1 memcg 里给整个容器设一个内存总上限（防止容器把手机内存吃光），这样 `docker --memory` 依然不生效。容器内装 earlyoom 是另一种兜底。
+- **agent 以非 root 用户工作**（第 16 轮）：agent 说只差"加 docker 组、开 linger、`/sdcard` 走 sudo"，漏了最大的一件：
+  - **引擎身份**：引擎由 `dshns exec` 以容器 root 启动，数据在 `/root/.dsh`（和兼容启动共用），工作区是 `/root/workspace`。换成 ubuntu 用户要改 App 启动引擎的身份、HOME/`DSH_HOME`、工作区和文件属主。
+  - **手机存储**：非 App uid 访问 `/sdcard` 报 "Bad address"（Android 的存储层只认 App 自己的 uid，只有容器 root 映射到它），"访问手机文件"会断。
+  - **权限等价**：有免密 sudo（镜像里 `/etc/sudoers.d/90-incus`）和 docker 组时，"非 root"只是默认身份，不是安全边界；真正的边界仍是用户命名空间。
+  - **rootless Podman**：本节修完后才可能可用。
+- **让 agent 开发调试 Android App**（第 17 轮）：
+  - **adb 和 su 分不开**：SukiSU 按 uid 决定给不给 root。容器里 adb 进来的和用户在 WSL 里 adb 进来的都是 shell uid 2000，没法区分；拒绝 shell 的 su，会连我们自己的 `adb shell su` 调试流程（§2）一起断掉。
+  - **adbd 暴露**：容器要连 adbd，得让它在网络上监听（无线调试或 `adb tcpip`），局域网也就能连到它。
+  - **更合适的做法**：在 App 已有的手机操控通道（有 token，只对容器网段开放，已有读屏、点击）上加白名单式的开发工具：安装自家包、启动、按 pid/uid 看日志、`run-as`。不要放进 dshns：它以宿主 root 运行，应保持最小。
+  - **工具链**：Android SDK 的 `aapt2`、`zipalign`，以及 Gradle 从 Maven 拉的 aapt2，在 Linux 上都只有 x86_64 版本；arm64 容器里构建 APK 要另找 arm64 的 aapt2，并用 `android.aapt2FromMavenOverride` 覆盖。apt 里有 arm64 的 `adb`。
+- **agent 别的说法**（第 15 轮的百分比表是它估的，不是测的）：
+  - "`/lib/modules` 不存在所以 `=m` 不可用"无关紧要：容器本来就不能加载内核模块。
+  - "`fstrim` 失败"不影响：存储挂载时带 discard，删除的空间已实测会还给手机。
