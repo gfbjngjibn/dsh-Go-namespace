@@ -2,6 +2,7 @@ package io.github.ccch1mneyyy.dsh_app.runtime
 
 import java.io.File
 import org.junit.Assert.*
+import org.junit.Assume.assumeFalse
 import org.junit.Test
 
 class SystemContainerTest {
@@ -110,6 +111,58 @@ class SystemContainerTest {
         } finally {
             root.deleteRecursively()
             elsewhere.deleteRecursively()
+        }
+    }
+
+    @Test fun aLocaltimeTheAppMayNotTouchIsRelabelledOnceThenFollowed() {
+        val root = utcRootfs("Asia/Shanghai")
+        val etc = File(root, "etc").toPath()
+        val open = java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x")
+        // Stands in for SELinux refusing a link of another level: the same AccessDeniedException.
+        val shut = java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")
+        try {
+            java.nio.file.Files.setPosixFilePermissions(etc, shut)
+            assumeFalse("needs an unprivileged test process", java.nio.file.Files.isSymbolicLink(etc.resolve("localtime")))
+            val relabelled = ArrayList<java.nio.file.Path>()
+            // Relabelling that does not help: one retry, then the refusal stands and nothing changed.
+            assertThrows(java.nio.file.AccessDeniedException::class.java) {
+                SystemContainer.followTimezone(root, "Asia/Shanghai") { relabelled.add(it) }
+            }
+            assertEquals(listOf(File(root.canonicalFile, "etc/localtime").toPath()), relabelled)
+            java.nio.file.Files.setPosixFilePermissions(etc, open)
+            assertEquals("../usr/share/zoneinfo/Etc/UTC", localtime(root))
+            // Relabelling that helps: the second try links the zone.
+            java.nio.file.Files.setPosixFilePermissions(etc, shut)
+            relabelled.clear()
+            assertTrue(SystemContainer.followTimezone(root, "Asia/Shanghai") {
+                relabelled.add(it)
+                java.nio.file.Files.setPosixFilePermissions(etc, open)
+            })
+            assertEquals(1, relabelled.size)
+            assertEquals("../usr/share/zoneinfo/Asia/Shanghai", localtime(root))
+            // Allowed from the start: no relabelling.
+            assertFalse(SystemContainer.followTimezone(root, "Asia/Shanghai") { fail("relabelled $it") })
+        } finally {
+            java.nio.file.Files.setPosixFilePermissions(etc, open)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun etcTimezoneIsReadableByTheContainersOtherUsers() {
+        val root = utcRootfs("Asia/Shanghai")
+        val named = File(root, "etc/timezone").toPath()
+        val readable = java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--")
+        try {
+            assertTrue(SystemContainer.followTimezone(root, "Asia/Shanghai"))
+            assertEquals(readable, java.nio.file.Files.getPosixFilePermissions(named))
+            // What an earlier version wrote under the app's umask: the right zone, unreadable to others.
+            java.nio.file.Files.setPosixFilePermissions(named, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
+            assertTrue(SystemContainer.followTimezone(root, "Asia/Shanghai"))
+            assertEquals(readable, java.nio.file.Files.getPosixFilePermissions(named))
+            assertEquals("Asia/Shanghai\n", File(root, "etc/timezone").readText())
+            assertFalse(SystemContainer.followTimezone(root, "Asia/Shanghai"))
+        } finally {
+            root.deleteRecursively()
         }
     }
 

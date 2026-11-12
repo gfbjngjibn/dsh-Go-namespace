@@ -343,10 +343,31 @@ object SystemContainer {
     fun followTimezone(context: Context, log: (String) -> Unit) {
         val zone = java.util.TimeZone.getDefault().id
         try {
-            if (followTimezone(layout(context).rootfs, zone)) log("[dsh-app] system container time zone: $zone")
+            if (followTimezone(layout(context).rootfs, zone, ::relabel)) log("[dsh-app] system container time zone: $zone")
         } catch (error: Exception) {
             log("[dsh-app] system container keeps its time zone: ${error.message}")
         }
+    }
+
+    /** Gives [path] itself, not what it links to, the label of the app's data back. */
+    private fun relabel(path: java.nio.file.Path) {
+        val out = RootShell.run(su(listOf("/system/bin/restorecon", path.toString())), timeoutMs = 30_000)
+        if (out.exitCode != 0) {
+            throw java.io.IOException("restorecon ${out.failure ?: "exit ${out.exitCode}"} ${out.lines.joinToString(" ")}".trim())
+        }
+    }
+
+    /**
+     * [followTimezone], relabelling etc/localtime once when the app may not touch it: timedatectl,
+     * or tzdata's postinst on an upgrade, makes it anew in the container, labelled by the ksu domain
+     * without the app's categories, and SELinux lets an app neither read nor replace a link of
+     * another level (plain files only need to be dominated).
+     */
+    internal fun followTimezone(rootfs: File, zone: String, relabel: (java.nio.file.Path) -> Unit): Boolean = try {
+        followTimezone(rootfs, zone)
+    } catch (_: java.nio.file.AccessDeniedException) {
+        relabel(File(rootfs.canonicalFile, "etc/localtime").toPath())
+        followTimezone(rootfs, zone)
     }
 
     /**
@@ -381,10 +402,14 @@ object SystemContainer {
         }
         val named = File(etc, "timezone").toPath()
         val text = "$zone\n"
-        if (java.nio.file.Files.isRegularFile(named, nofollow) && String(java.nio.file.Files.readAllBytes(named)) != text) {
+        // The app's umask makes what it writes 0600; the container's other users read this file too.
+        val readable = java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--")
+        if (java.nio.file.Files.isRegularFile(named, nofollow) && (String(java.nio.file.Files.readAllBytes(named)) != text ||
+                java.nio.file.Files.getPosixFilePermissions(named, nofollow) != readable)) {
             replace("timezone") { tmp ->
                 java.nio.file.Files.newByteChannel(tmp, setOf(java.nio.file.StandardOpenOption.WRITE,
                     java.nio.file.StandardOpenOption.CREATE_NEW, nofollow)).use { it.write(java.nio.ByteBuffer.wrap(text.toByteArray())) }
+                java.nio.file.Files.setPosixFilePermissions(tmp, readable)
             }
             changed = true
         }

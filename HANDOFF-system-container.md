@@ -6,12 +6,13 @@
 
 ## 0. 现在到哪了
 
-- 分支 `system-container`，都已提交并推送到 fork：`09e4691`（第一期 + 存储、备份）、`6e688aa`（独立网络、Docker/Podman）、`1eaa590`（中继泄漏）、`c512310`、`66bb44e`（补内核后的一轮：必需内核项、pids、nft、IPv6）、`635f493`（交接）、`4017336`（2026-11-10 的一轮，见下一条）、`72e6d47`（交接拆分、`runtime/container/tests/` 的测试脚本）、`7c717ce`（第九个会话：时区跟随手机、实测记录），`a5a563e`（上游合并难度评估），以及**合并上游 `e73000e3`（v1.0.15）的合并提交**（第十到十二个会话，历史 §15–§18）。原来的分叉点是 `bf62b596`（2026-11-02，v1.0.9 之后）；合并后与上游的差异是 67 个文件。
+- 分支 `system-container`，都已提交并推送到 fork：`09e4691`（第一期 + 存储、备份）、`6e688aa`（独立网络、Docker/Podman）、`1eaa590`（中继泄漏）、`c512310`、`66bb44e`（补内核后的一轮：必需内核项、pids、nft、IPv6）、`635f493`（交接）、`4017336`（2026-11-10 的一轮，见下一条）、`72e6d47`（交接拆分、`runtime/container/tests/` 的测试脚本）、`7c717ce`（第九个会话：时区跟随手机、实测记录），`a5a563e`（上游合并难度评估），**合并上游 `e73000e3`（v1.0.15）的合并提交** `7a6f3857`（第十到十二个会话，历史 §15–§18），以及之后的时区修复（历史 §18 末尾）。原来的分叉点是 `bf62b596`（2026-11-02，v1.0.9 之后）；合并后与上游的差异是 67 个文件。
 - **`4017336` 里有什么**：第七个会话的改动（tun/FUSE 设备节点、`/home` 放进容器存储、签名带 launcher、启动失败时的清理、`PhoneBridge` 重绑、「容器存储」文案；历史 §10 末尾和 §11），加上审查后的三处小改（提示词加了"拒绝 root 的程序用 `ubuntu` 跑"一条、monitor 忽略 SIGPIPE、`dshns run` 失败时也清理 cgroup；历史 §12）。平板上的 APK 11102027（launcher `d37e6799…`）就是这个提交的代码，已在真机验收。
 - **审查结论（2026-11-10，第八个会话）**：主线没有走歪。审查发现的问题和处理结果记在 §5 开头。
 - **第九个会话（2026-11-10 晚）做了 §6 第 1 步**：在 App 的新对话里，agent 没被提醒就用 `su - ubuntu` 跑了 PostgreSQL 的 `initdb`（数据放 `/home/ubuntu`、自己处理了属主），也真调通了一次 `mcp__phone__screen`。新发现：`su -` 会丢掉 App 传进来的 `TZ`。按用户的决定改成**容器时区跟随手机**（§1、§4），APK 11102106 真机验过。中间我在设备上对 App 数据目录跑了一次递归 `grep`，把平板搞到内核 OOM 崩溃重启（§2 那条警告），存储下次启动时自动重放了日志，没有损失。详情在历史 §13、§14。代码、测试、文档和 `trace.sh` 在提交 `7c717ce` 里。测试用的 PostgreSQL 已清掉，三个测试对话留在 App 里。
 - **合并上游已完成、已提交并推送（2026-11-12，第十到十二个会话）**：本机验证全过（Kotlin 2288 个、`flutter analyze`、生成物检查、Python 测试；Dart 的失败项和上游逐一相同）。APK 11121729（1.0.15）真机回归过了：运行时升级、系统容器、agent 端到端、启动失败自动回退（三处入口里的第一处）、兼容启动、容器开着时上游的 `killStrays()` 关卡（工作区索引救援两个方向）、「退出 DSH Go（含容器）」（引擎页和常驻通知各一次，重新打开 App 后都回来了）。怎么合的、各处的取舍见历史 §16、§17，收尾见 §18。
-- 平板当前（2026-11-12 晚）：**APK 11121729（1.0.15，运行时 `r15-dsh0.2.2-rc.1…2caa7df10841`）**，引擎在系统容器里跑，用原工作区索引（第十二个会话切过一次救援索引又切回，救援索引留在磁盘上）；装之前用 App 做了备份 `dsh-system-20261112-174714.tar.gz`（813 MB）。以下是装之前的记录：APK 11102027；容器是备份 Y 恢复的（`/home` 在存储上），装着 docker.io 和 podman（各有一个 alpine）；引擎在容器里（3080），手机操控 relay 连着，无障碍服务绑定着；Docker 接管开。`Download/DSH-Go/backups` 里有 11-07 14:46 的一份和 11-10 的两份（X 15:14 旧格式、Y 15:26 新格式），都含对话和 API 配置，要不要删由用户决定。
+- **合并之后改了时区（已提交并推送，紧跟在合并提交之后）**：用户定改，`followTimezone` 遇到容器建的 `/etc/localtime`（App 读不了、换不掉）时经 root `restorecon` 再试一次；`/etc/timezone` 写成 0644（以前是 0600，`ubuntu` 读不了）。单元测试和真机都过了（APK 11121848），见 §4「时区」、历史 §18 末尾。
+- 平板当前（2026-11-12 晚）：**APK 11121848（1.0.15 + 上面的时区修改，运行时 `r15-dsh0.2.2-rc.1…2caa7df10841`）**，引擎在系统容器里跑，用原工作区索引（第十二个会话切过一次救援索引又切回，救援索引留在磁盘上）；装之前用 App 做了备份 `dsh-system-20261112-174714.tar.gz`（813 MB）。以下是装之前的记录：APK 11102027；容器是备份 Y 恢复的（`/home` 在存储上），装着 docker.io 和 podman（各有一个 alpine）；引擎在容器里（3080），手机操控 relay 连着，无障碍服务绑定着；Docker 接管开。`Download/DSH-Go/backups` 里有 11-07 14:46 的一份和 11-10 的两份（X 15:14 旧格式、Y 15:26 新格式），都含对话和 API 配置，要不要删由用户决定。
 
 ## 1. 用户已经拍板的决定
 
@@ -29,6 +30,7 @@
 - **`/home` 在容器存储里**，和 Docker 共用一块，不另挂；`/root` 不挪进存储。界面上叫「容器存储」。
 - **这一版不做 / 不测**：`/sys` 不重挂；热点不测（平板不能插卡）；R3（VPN 锁定时的阻止规则）不测。
 - **安全模型**：App 已在 SukiSU 授权 root；容器里的进程必须带 KernelSU 的 no-new-privs 标志（`su --ksu-no-new-privs`，dshns 自己也调 ioctl `_IO('K',21)`）。带标志后容器内执行 su 和 GRANT_ROOT 都会被拒；被拒时 su 仍会执行、退出码 0，只是以 App 身份运行，所以不能拿退出码判断（`dshns trial` 看 `id -u`）。
+- `THIRD_PARTY_NOTICES.md` 里 proot 的版本不改（仍写 `5.1.107.98`，和上游一致；实际钉的是 `.102`，2026-11-12 定）。
 - 第一次推送带了真实邮箱的那个旧提交：用户决定不处理，**不要再提起**，也不要建议联系 GitHub Support 或删 fork；新提交只用 noreply 邮箱。
 
 ## 2. 环境与操作要点
@@ -137,7 +139,7 @@
 - **App（Kotlin）**：`runtime/SystemContainer.kt`（安装、启动、签名、存储、备份恢复、Docker 配置）、`SystemCheck`（检查页 25 项，其中 10 个必需内核选项）、`RootShell`、`QuitActivity`、`RuntimeController`（偏好、失败回退）、`DshProcess`、`GuestSetup`（给 agent 的环境说明）、`phone/PhoneBridge.kt`（在 `10.213.0.1` 上只对容器网段监听）。
 - **App（Dart）**：`lib/ui/engine/system_container_section.dart`（引擎页的系统容器区块）、诊断页的开关和检查表单；文案在 `lib/l10n/parts/phone_{zh,en}.arb`。
 - **容器签名**（不同就先停再起）= runtime 版本 + launcher 的 sha256（取自 `system.json`）+ 启动参数（不含启动器路径）+ 接管 Docker 时的整份 `daemon.json`。
-- **时区**（`SystemContainer.followTimezone`，`RuntimeController` 在写 Docker 配置之后、启动容器之前调）：把 rootfs 的 `etc/localtime` 换成指向 `../usr/share/zoneinfo/<手机时区>` 的软链接（临时名再 rename，和 `timedatectl` 一样的形式），镜像有 `etc/timezone` 就同步改写；没变就什么都不做、不写日志，变了记一行 "system container time zone: …"。镜像的 tzdata 里没有这个时区（或者名字不像时区）、`etc` 不是 rootfs 自己的目录时不动，记一行 "keeps its time zone"。**不进签名**：rootfs 就是容器的 `/`，容器在跑时新起的进程和 systemd 服务立刻读到新值（实测），不用重启。引擎进程另外仍有 `TZ`。
+- **时区**（`SystemContainer.followTimezone`，`RuntimeController` 在写 Docker 配置之后、启动容器之前调）：把 rootfs 的 `etc/localtime` 换成指向 `../usr/share/zoneinfo/<手机时区>` 的软链接（临时名再 rename，和 `timedatectl` 一样的形式），镜像有 `etc/timezone` 就同步改写（0644；内容对但权限不对也重写）；没变就什么都不做、不写日志，变了记一行 "system container time zone: …"。镜像的 tzdata 里没有这个时区（或者名字不像时区）、`etc` 不是 rootfs 自己的目录时不动，记一行 "keeps its time zone"。容器里重建过的 `/etc/localtime`（`timedatectl`、tzdata 升级）标签没有 App 的分类，App 读不了也换不掉，碰到 `AccessDeniedException` 时经 root（`su -W --ksu-no-new-privs`）对这一个链接 `restorecon` 再试一次（历史 §18）。**不进签名**：rootfs 就是容器的 `/`，容器在跑时新起的进程和 systemd 服务立刻读到新值（实测），不用重启。引擎进程另外仍有 `TZ`。
 - **启动失败**：App 记下失败时的 runtime 版本，之后改用直接或兼容启动，直到用户重新打开「系统容器启动」开关。
 
 ## 5. 已知问题 / 没验证的
@@ -186,9 +188,8 @@
 ### 其他
 
 - 「系统容器启动失败 → 自动回退」现在有三处入口（容器起不来、`dshns exec` 失败、token 超时且尾部有 `[dshns]` 行），真机上只触发过第一处（历史 §17）。
-- **App 读不了、删不了、换不掉容器里建的软链接**（历史 §17）：容器里 `timedatectl set-timezone` 或 apt 升级 tzdata 重建 `/etc/localtime` 之后，`followTimezone` 每次启动都记 "keeps its time zone"，时区不再跟手机；`GuestFiles` 沿这种链接（rootfs 里 apt 建的有 262 个）打开文件也会失败。平板上那个链接已 `restorecon` 修好，代码没改；建议的改法（遇到 AccessDenied 经 root 对那个链接 `restorecon` 再试一次）等用户定。
+- **App 读不了、删不了、换不掉容器里建的软链接**（历史 §17）：`/etc/localtime` 已由 `followTimezone` 处理（§4「时区」）；`GuestFiles` 沿这种链接（rootfs 里 apt 建的有 262 个）打开文件仍会失败，用户定这次不管。
 - 上游自己的毛病，没动：token 超时（180 秒）后走 Direct 回退或"自动进安全模式重启"时 `restartNow` 会卡在 STOPPING（按一次停止能恢复）；系统容器的回退已绕开（历史 §17）。
-- `THIRD_PARTY_NOTICES.md` 里 proot 写的是 `5.1.107.98`，实际钉的是 `.102`（合并前就这样），改不改等用户定。
 - 容器里执行 `reboot`：monitor 当作退出，**不会自动重启**。容器自己停掉时，引擎页的状态要等下一次状态事件才刷新。
 - 存储授权变化、runtime 升级、dshns 变化时，下次启动引擎会自动重启容器，日志里有一行说明。
 - `dsh-exec` cgroup 在 systemd 的 unit 体系之外。

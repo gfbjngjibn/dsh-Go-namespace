@@ -1181,8 +1181,19 @@ Kotlin 全量（`cd app/android && ./gradlew :app:testArm64DebugUnitTest`）、D
 - 合并提交前核对过：`git diff --diff-filter=U` 为空；暂存里的 `app/pubspec.lock` 和上游一字不差（不是构建改过镜像地址的那份）；合并后与上游 `e73000e3` 的差异是 67 个文件（我们原来的 66 个 + `runtime/tests/test_input_store.py` 的 PIN 名）。
 - 合并提交连同交接文档一起提交，推到 `fork` 的 `system-container`。
 
-### 还没定的（§17 第 4、5 项，已问用户）
+### 用户的决定（§17 第 4 项）
 
-- 容器里建的软链接 App 读不了、删不了（`followTimezone` 因此会停止跟随，`GuestFiles` 沿这种链接打开文件会失败；§17「回归中发现的老问题」），要不要按 §17 的建议改。
-- `THIRD_PARTY_NOTICES.md` 里 proot 还写着 `5.1.107.98`（我们实际钉的是 `.102`），要不要改。
+- **时区：改**（下一小节）。
+- **`THIRD_PARTY_NOTICES.md` 的 proot 版本：不改**（仍写 `5.1.107.98`，和上游一致）。
 - 没做：VPN / 熄屏 / Doze、容器开着时升级运行时（要另一个运行时版本不同的 APK）。
+
+### 容器建的 `/etc/localtime` 和 `/etc/timezone` 的权限（APK 11121848，紧跟合并提交的下一个提交，已推送）
+
+- **复现**（APK 11121729）：容器里 `timedatectl set-timezone Europe/Berlin` 之后，`/etc/localtime` 变成 `-> /usr/share/zoneinfo/Europe/Berlin`（绝对路径），宿主上的标签是 `app_data_file:s0`，没有 App 的分类。同时发现**另一个老毛病**：`/etc/timezone` 是 `0600`（第九个会话起 App 改写它时受 App 的 umask 影响），`su - ubuntu -c 'cat /etc/timezone'` 报 Permission denied；镜像原本是 0644。
+- **改法**（`SystemContainer.kt`）：
+  - `followTimezone(rootfs, zone, relabel)`：单次的 `followTimezone(rootfs, zone)` 抛 `AccessDeniedException` 时，经 root 对 `etc/localtime` 跑一次 `/system/bin/restorecon`（`su -W --ksu-no-new-privs -c`，和 dshns 同一种调用；退出码非 0 就抛 IOException，日志里是 "keeps its time zone: restorecon …"），再试一次；第二次还被拒就照旧记 "keeps its time zone"。`etc` 是不是 rootfs 自己的目录仍在 App 这边先检查，root 只对 `etc/localtime` 这一个路径做 relabel；检查和 relabel 之间容器把 `etc` 换成软链接的窗口还在，最坏是 root 把别处一个文件的标签恢复成策略的默认值，接受。toybox `restorecon` 改的是链接本身、不跟随（下面实测）。
+  - `etc/timezone` 写成 0644（`setPosixFilePermissions`，不受 umask 影响）；内容对但权限不是 0644 时也重写，已有的设备第一次启动就会自愈（日志多一行 "system container time zone: …"）。
+- **单元测试**（`SystemContainerTest`，15 个全过、没有跳过）：用去掉 `etc` 的 x 权限造出同样的 `AccessDeniedException`：relabel 不管用时只重试一次、抛出、链接不变；relabel 管用时第二次成功；本来就允许时不 relabel。`etc/timezone`：新写的是 0644，旧的 0600 会被改成 0644，之后不再改。root 跑测试时第一个会 `assume` 跳过。
+- **先在设备上单独验了命令**：容器里建一个测试链接（标签 `s0`），以 App uid 经 `su -W --ksu-no-new-privs -c '/system/bin/restorecon <路径>'` → 退出码 0，标签变成 `s0:c90,c257,c512,c768`（输出里有几行 "SELinux: Loaded file context from: …"，成功时不进日志）。
+- **真机**（APK 11121848，容器开着、`/etc/localtime` 是上面 `timedatectl` 建的那个）：装上后打开 App，日志 "system container time zone: Asia/Shanghai"，没有 "keeps its time zone"，容器没重启（init 还是 8904）。容器里：root、`su - ubuntu`、`systemd-run` 起的服务、`timedatectl` 都是 Asia/Shanghai（CST +0800）；`/etc/localtime -> ../usr/share/zoneinfo/Asia/Shanghai`，标签带 App 的分类；`/etc/timezone` 0644，`ubuntu` 读得到；`etc` 下没有留下 `.localtime.dsh-app`、`.timezone.dsh-app`。
+- **没管的**：`GuestFiles` 沿容器建的软链接打开文件仍会失败（用户定这次不管）；tzdata 升级后 `usr/share/zoneinfo` 里的链接（如 `Asia/Calcutta`）也会变成 `s0`，手机时区恰好是这种链接名时 App 判断"镜像里没有这个时区"，不变（`Asia/Shanghai` 是普通文件，不受影响）。
