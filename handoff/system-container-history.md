@@ -945,3 +945,69 @@ agent 的每一步从会话记录里读：`/root/.dsh/sessions/--root-workspace-
 - **后果**：容器的存储在崩溃时是挂着的；下一次启动时 `e2fsck -p` 打出 "dsh-storage: recovering journal"，随后 "clean"，容器正常起来。`/home` 早就搬完，不在搬迁中。没有发现别的损失。
 - **以后**：入口文档 §2 加了警告——不要在设备上对 App 的数据目录跑递归 `grep`；找文件用 `find -name`，搜内容先限定目录或排除 `storage.img`；崩溃记录在哪看。拉回本机的 45 MB minidump（内存镜像，可能有隐私数据）已删，只留了 kmsg 文本在 scratchpad。
 - 另外一个容易犯的错（这一轮犯了两次）：`adb shell su -c 'a; b'` 只有 a 以 root 执行，后面的 `[ -d /proc/$P ]`、`ls` 以 shell 身份跑，看不到别人的进程、读不了 App 的目录，会误判"容器没起来""权限不够"。一律用 `adb shell su <<'EOF'`（入口文档 §2 早就写了）。
+
+## 15. 合并上游的难度评估（2026-11-12，第九个会话，**没合**）
+
+用户要求"先看一波合并难度，这一轮只看，不真的合"。只做了 `git fetch origin`（更新了 `origin/*` 和 tag v1.0.11–v1.0.15）和 `git merge-tree` 预演，没有动分支和工作区。
+
+### 怎么复现
+
+```sh
+git fetch origin
+git merge-base HEAD origin/main                      # bf62b596（2026-11-02，v1.0.9-2）
+git rev-list --count $(git merge-base HEAD origin/main)..origin/main
+git merge-tree --write-tree --name-only --messages HEAD origin/main   # 第一行是树，之后是冲突文件，空行后是 CONFLICT 说明
+git show <树>:<文件>                                  # 看带冲突标记的合并结果
+```
+
+比较文件清单时用 `LC_ALL=C sort` + `comm`（否则 `comm` 报 "not in sorted order"，结果不全）。
+
+### 规模（`origin/main` = `708bdc32`，2026-11-12 13:48）
+
+- 上游：1337 个提交（first-parent 234），v1.0.9 → v1.0.15，3012 个文件，+381688/−36672。
+- 我们（到 `7c717ce`）：9 个提交，66 个文件，+8203/−212。
+- 两边都改过：34 个文件，16 个冲突（15 个 content、1 个 add/add），18 个自动合并；没有删改冲突。
+- 只有我们改过、上游没碰的 32 个：`dshns.c`、`SystemContainer.kt`、`SystemCheck.kt`、`RootShell.kt`、`QuitActivity.kt`、`LaunchDiagnostics.kt`、`system_container_section.dart`、`direct_engine_settings.dart`、`system_check_sheet.dart`、`runtime/locks/ubuntu-noble-arm64-system.json`、`runtime/container/tests/*`、交接文档和对应测试。
+
+### 冲突文件（冲突块数 / 冲突区行数 / 我们的改动 / 上游的改动）
+
+| 文件 | 块 | 行 | 我们 | 上游 | 性质 |
+|---|---|---|---|---|---|
+| `runtime/RuntimeController.kt` | 5 | 275 | +218/−3 | +388/−91 | 第 1 块：我们 161 行系统容器函数 vs 上游新加的 `setWorkspaceRecovery`，保留两边；第 4 块：重置前停容器 vs 上游的 `reapStrays()`，保留两边；**第 2、3、5 块**：引擎启动、启动失败、退出分类，上游重写成 `startupError`/`publishStartupFailure`/`classifyAfterTokenTimeout`（#75），我们的 `prepareSystemContainer`、`systemLaunchFailed`、`p.start(..., system.requested, ...)`、`SafePolicy.directLaunchFailed(f, source.system)` 要重新嵌进去 |
+| `runtime/lib/rtbuild.py` | 6 | 290 | +352/−157 | +359/−74 | 两边都把写 tar 抽成函数：我们 `normalize_tree` + `write_tar(..., owners)`（系统镜像要保留属主），上游 `write_archive(entries, out, args, layered=)` + `partition_entries`、基础层缓存、`origins` 统计。要以上游的为准，把 `owners` 和系统镜像那条路（`cmd_system_image`）接上去 |
+| `files/GuestFiles.kt` | 4 | 41 | +13/−4 | +19/−13 | 上游加了 l2s 绝对目标的重定位和 `phoneRoot` 参数；我们加了系统容器 rootfs（`hostOf(rootfs, system, …)`）。参数并起来 |
+| `phone/PhoneBridge.kt` | 1 | 28 | +63/−7 | +44/−13 | 上游 `acceptTcp` 改成 `while (current(token))`，去掉了 `running`；我们的 `containerOnly` + `forgetBridge` 要按新生命周期改 |
+| `runtime/DshProcess.kt` | 2 | 11 | +64/−8 | +54/−11 | `start()` 两边都加了参数；日志行上游加了 `redactor.line(line)`，我们加了 `SystemContainer.execPid(line)` |
+| `runtime/CrashClassifier.kt` | 1 | 7 | +5/−1 | +25/−6 | 一个条件式：上游加 `PROOT_EXEC_FAILED`/`PROOT_ASSERT_FAILED`，我们加 `SYSTEM_FAILED` |
+| `res/values{,-zh}/i18n_strings.xml` | 1+1 | 15+15 | +8/−0 | +36/−3 | 上游把 `service_stop_phone`/`service_stop` 改了文案；我们加了退出对话框的 6 个串和 `service_quit` |
+| `test/.../files/GuestFilesTest.kt` | 1 | 178 | +27（新建） | +158（新建） | add/add：两边都新建了这个文件，合成一份 |
+| `test/.../runtime/ProcessLaunchGuardTest.kt` | 1 | 14 | +4 | +45 | 末尾各加了测试 |
+| `docs/guide/{zh,en}/11-faq.md` | 1+1 | 29+29 | +18 | +35/−4 | 末尾各加一节（我们「用系统容器跑引擎」、上游 headless 的 `MISSING_CREDENTIAL`），保留两边 |
+| `app/assets/skills/dsh-go-guide/{zh,en}-11-faq.md` | | | | | 生成物，合完 `python3 app/tool/guide_sync.py` |
+| `app/assets/skills/dsh-go-support/SKILL.md` | 1 | 5 | +4/−3 | +21/−7 | 上游改写了诊断内容那一句；我们在旧句子里加了"启动方式（proot/direct/system）"，挪进新句子 |
+| `app/lib/ui/engine/engine_screen.dart` | 2 | 11 | +2 | +23/−6 | import 和 widget 各一处：我们 `SystemContainerSection`，上游 `WorkspaceRecoverySettings`，保留两边 |
+
+### 自动合并、合完要核对的 18 个
+
+- 生成物：`app/lib/l10n/app_{zh,en}.arb`、`app/lib/l10n/gen/*.dart`（上游动了几万行）。不要信自动合并的结果，合完跑 `python3 app/tool/l10n_merge.py`，再 `--check`。
+- `parts/phone_{zh,en}.arb`（上游 +192/+206）：我们的「容器存储」等键要还在、中英同步。
+- `GuestSetup.kt`（提示词，上游 +18/−11）和 `GuestAgentsModeTest`（上游 +51）：`SYSTEM_EXTRA` 的位置和措辞、断言。
+- `AndroidManifest.xml`（上游 +50；我们加了 `QuitActivity`）、`DshService.kt`（上游 +45/−13；常驻通知的「退出」）、`RuntimePlugin.kt`、`PhoneControl.kt`（上游 +590/−120）、`PhoneGuest.kt`、`CrashClassifierTest`、`runtime_bridge.dart`、`diagnostics_page.dart`（上游 +109；我们的开关和检查表单）。
+- `runtime/build-runtime.sh`（上游 +115/−48，接通了双层构建）：合并结果里 `PROOT_VERSION` 还是我们的 `5.1.107.102`（上游仍是 `.98`，那个版本已从 Termux 镜像下架）；`--system-only`、NDK、LXC 缓存那段要能跑。
+
+### 上游的分层运行时和系统容器
+
+上游 11-09 到 11-12 的几个提交（`70337878` preserve installed system across engine upgrades、`b49b185e` 安装器按层解压、`55919bae` rtbuild 按层分区、`1aad6b73` 构建脚本接通双层、`7a704a72` 删 `rootfs.old`）把运行时改成基础层 + 引擎层：
+
+- 设备上的 proot rootfs 仍是 `files/runtime/rootfs` 一个目录，`/root` 保留；首次安装按层解压。
+- 引擎升级由 `EngineUpgrade` 做：只替换 `ENGINE_PATHS`（`opt/dsh`、`opt/node`、`opt/dsh-go`、`etc/dsh-app`、`etc/profile.d/dsh-app.sh`、`usr/local/lib/node_modules/pnpm`、`usr/local/bin/{dsh,node,npm,npx,corepack,pnpm,pnpx,pn,pnx}`），旧的 rename 走、新的 rename 进来，之后删掉。
+- 我们的 `SystemContainer.SHARED` 绑定 `root`、`opt/dsh`、`opt/node`、`opt/python`、`opt/dsh-go`、`opt/dsh-app`、`usr/local`、`etc/dsh-app`、`var/lib/dsh-app`（不检查存在与否；上游的 rootfs 里 `opt/python`、`opt/dsh-app` 都还在）。
+- 推断：容器开着时升级引擎，容器里的 `/opt/dsh` 等还指着被换走的旧目录（删掉后是空的），直到容器重启；签名带 runtime 版本，下次启动引擎时会先重启容器，所以原理上兼容。`usr/local` 是整个目录绑进去的，里面的文件替换容器里立刻可见。**这条路要上机测**：容器开着 → 装一个 runtime 版本不同的 APK → 启动引擎。
+- 上游重置前的 `reapStrays()`：要确认它不会因为看不到容器里的进程（ksu 域）而误判或卡住。
+
+### 建议
+
+- **merge，不 rebase**：把 `origin/main` 合进 `system-container`，一次解决冲突；rebase 要改写 fork 上已推送的 9 个提交并强推。
+- 顺序：先解决三个保留两边的大类和生成物，再做 `PhoneBridge`/`GuestFiles`/`DshProcess`/`CrashClassifier`，最后 `RuntimeController` 和 `rtbuild.py`（先读上游这两处的完整新版本）。
+- 合完的验证：Kotlin 全量、Dart 全量（本机有 43 个截图/外网测试本来就失败，要对照）、`flutter analyze`、`l10n_merge --check`、`guide_sync --check`、`node --test runtime/tests`；`runtime/build-runtime.sh arm64-v8a`（上游的分层构建第一次跑可能要下载新的钉死包）和 `--system-only`；打 APK；真机：系统容器全套（历史 §10、§12 的验收）、兼容启动、启动失败回退、引擎升级。
+- 工作量：解决冲突大半天，加构建和真机回归，一个完整会话以上。上游每天几十个提交，开工前重新 fetch、重跑 `merge-tree`。

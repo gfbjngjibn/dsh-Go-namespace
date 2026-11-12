@@ -6,10 +6,10 @@
 
 ## 0. 现在到哪了
 
-- 分支 `system-container`，第八个会话为止都已提交并推送到 fork（第九个会话的一个提交还没推送，见下面）：`09e4691`（第一期 + 存储、备份）、`6e688aa`（独立网络、Docker/Podman）、`1eaa590`（中继泄漏）、`c512310`、`66bb44e`（补内核后的一轮：必需内核项、pids、nft、IPv6）、`635f493`（交接）、`4017336`（2026-11-10 的一轮，见下一条），以及紧随其后的一个 docs 提交（交接拆分、`runtime/container/tests/` 的测试脚本）。
+- 分支 `system-container`，都已提交并推送到 fork：`09e4691`（第一期 + 存储、备份）、`6e688aa`（独立网络、Docker/Podman）、`1eaa590`（中继泄漏）、`c512310`、`66bb44e`（补内核后的一轮：必需内核项、pids、nft、IPv6）、`635f493`（交接）、`4017336`（2026-11-10 的一轮，见下一条）、`72e6d47`（交接拆分、`runtime/container/tests/` 的测试脚本）、`7c717ce`（第九个会话：时区跟随手机、实测记录），以及最后一个 docs 提交（上游合并难度评估，§6 第 0 条）。**还没有合并上游**（`origin/main`），分叉点是 `bf62b596`（2026-11-02，v1.0.9 之后）。
 - **`4017336` 里有什么**：第七个会话的改动（tun/FUSE 设备节点、`/home` 放进容器存储、签名带 launcher、启动失败时的清理、`PhoneBridge` 重绑、「容器存储」文案；历史 §10 末尾和 §11），加上审查后的三处小改（提示词加了"拒绝 root 的程序用 `ubuntu` 跑"一条、monitor 忽略 SIGPIPE、`dshns run` 失败时也清理 cgroup；历史 §12）。平板上的 APK 11102027（launcher `d37e6799…`）就是这个提交的代码，已在真机验收。
 - **审查结论（2026-11-10，第八个会话）**：主线没有走歪。审查发现的问题和处理结果记在 §5 开头。
-- **第九个会话（2026-11-10 晚）做了 §6 第 1 步**：在 App 的新对话里，agent 没被提醒就用 `su - ubuntu` 跑了 PostgreSQL 的 `initdb`（数据放 `/home/ubuntu`、自己处理了属主），也真调通了一次 `mcp__phone__screen`。新发现：`su -` 会丢掉 App 传进来的 `TZ`。按用户的决定改成**容器时区跟随手机**（§1、§4），APK 11102106 真机验过。中间我在设备上对 App 数据目录跑了一次递归 `grep`，把平板搞到内核 OOM 崩溃重启（§2 那条警告），存储下次启动时自动重放了日志，没有损失。详情在历史 §13、§14。代码、测试、文档和 `trace.sh` 是**一个提交，还没推送**。测试用的 PostgreSQL 已清掉，三个测试对话留在 App 里。
+- **第九个会话（2026-11-10 晚）做了 §6 第 1 步**：在 App 的新对话里，agent 没被提醒就用 `su - ubuntu` 跑了 PostgreSQL 的 `initdb`（数据放 `/home/ubuntu`、自己处理了属主），也真调通了一次 `mcp__phone__screen`。新发现：`su -` 会丢掉 App 传进来的 `TZ`。按用户的决定改成**容器时区跟随手机**（§1、§4），APK 11102106 真机验过。中间我在设备上对 App 数据目录跑了一次递归 `grep`，把平板搞到内核 OOM 崩溃重启（§2 那条警告），存储下次启动时自动重放了日志，没有损失。详情在历史 §13、§14。代码、测试、文档和 `trace.sh` 在提交 `7c717ce` 里。测试用的 PostgreSQL 已清掉，三个测试对话留在 App 里。
 - 平板当前：APK 11102027；容器是备份 Y 恢复的（`/home` 在存储上），装着 docker.io 和 podman（各有一个 alpine）；引擎在容器里（3080），手机操控 relay 连着，无障碍服务绑定着；Docker 接管开。`Download/DSH-Go/backups` 里有 11-07 14:46 的一份和 11-10 的两份（X 15:14 旧格式、Y 15:26 新格式），都含对话和 API 配置，要不要删由用户决定。
 
 ## 1. 用户已经拍板的决定
@@ -196,6 +196,13 @@
 
 ## 6. 下一步和还没定的方向
 
+0. **合并上游**（2026-11-12 评估，**没合**；详细在历史 §15）：上游从分叉点 `bf62b596` 到 `708bdc32`（2026-11-12）有 1337 个提交（v1.0.9 → v1.0.15，3012 个文件、+38 万行），我们 9 个提交、66 个文件。两边都改过 34 个文件：16 个冲突、18 个自动合并；没有删改冲突。我们的核心文件（`dshns.c`、`SystemContainer.kt`、`SystemCheck`、`RootShell`、`QuitActivity`、`system_container_section.dart`、`runtime/container/tests/`）上游都没碰。
+   - **保留两边就行的**：`engine_screen.dart`、中英 FAQ（`app/assets/skills/dsh-go-guide/*-11-faq.md` 是生成的，合完跑 `guide_sync.py`）、`i18n_strings.xml`（上游改了两个按钮文案）、`dsh-go-support/SKILL.md` 一句、`RuntimeController` 第 1、4 块、`GuestFilesTest`（两边都新建了）、`ProcessLaunchGuardTest`。
+   - **要把我们的改动搬到上游新写法上的**：`PhoneBridge`（上游把 `running` 换成按 token 判断，`forgetBridge`/`containerOnly` 跟着改）、`GuestFiles`（上游的 l2s 目标重定位 + `phoneRoot`，和我们的系统容器 rootfs 映射并起来）、`DshProcess.start` 的参数和日志脱敏、`CrashClassifier` 一个条件式。
+   - **难的两处**：`RuntimeController` 第 2、3、5 块（上游重写了启动失败处理：`startupError`、`publishStartupFailure`、token 超时 #75、`reapStrays`；「系统容器启动失败 → 自动回退」要重新嵌进去）；`rtbuild.py`（两边各自把写 tar 抽成函数：我们的 `write_tar` 带保留属主，上游的 `write_archive` 带基础层/引擎层两层构建；系统镜像构建要改用上游的函数）。
+   - **自动合并、合完要核对的**：生成物（`app_*.arb`、`gen/*.dart`）不手合、跑 `l10n_merge.py`；`GuestSetup`（提示词）、`AndroidManifest`、`DshService`、`PhoneControl`（上游 +590）、诊断页、`build-runtime.sh`（我们把 proot 钉到 .102 的本地改动合并后还在）。
+   - **上游的分层运行时**：proot rootfs 仍是 `files/runtime/rootfs` 一个目录；引擎升级（`EngineUpgrade`）按 rename 原地替换 `ENGINE_PATHS`（`opt/dsh`、`opt/node`、`opt/dsh-go`、`etc/dsh-app`、`usr/local/bin/*`…），和 `SystemContainer.SHARED` 重叠。签名带 runtime 版本，升级后下次启动引擎会重启容器、拿到新绑定，原理上兼容；**容器开着时升级引擎**要上机测。
+   - **做法**：merge（把 `origin/main` 合进 `system-container`），不 rebase（rebase 要强推 fork 上已推送的分支）。合完：Kotlin、Dart 全量、`flutter analyze`、`l10n_merge --check`、`guide_sync --check`、`node --test runtime/tests`；重建运行时（上游的分层构建 + 我们的 `--system-only`）、打 APK；真机回归系统容器全套 + 兼容启动 + 引擎升级。估计一个完整会话以上。上游动得很快，开工前重新 `git fetch origin` 再跑一遍 `git merge-tree`。
 1. ~~新对话里让 agent 真用一次 `su - ubuntu -c`，顺便真调一次 `mcp__phone__*`~~：**第九个会话做了，都过了**（历史 §13）。提示词那一条够用，审查后建议的「复制后 `chown`」这次 agent 自己做了，先不加。剩下的是时区（第 4 条）。
 2. **测 VPN 开关、熄屏/Doze、后台**：容器和引擎是否跟着 App 的路由表，netd 清规则后 2 秒内是否补回。
 3. 视需要支持容器内 `reboot`（monitor 重新启动容器）和容器状态的定期刷新。
