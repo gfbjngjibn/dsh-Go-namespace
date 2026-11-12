@@ -13,10 +13,10 @@ import java.nio.file.LinkOption
  *
  * proot maps the guest root onto the rootfs (`filesDir/runtime/rootfs`, see
  * RuntimeInstaller) and, with phone storage on, binds the shared storage at
- * `/sdcard` and `/storage` (PhoneStorage.binds). Symlinks inside the rootfs
- * hold *guest* targets (`/usr/lib/…`, and `--link2symlink` turns hard links
- * into links into `/root/.l2s`), so each one is followed in the guest world,
- * not by Android.
+ * `/sdcard` and `/storage` (PhoneStorage.binds). Symlinks usually hold guest
+ * targets (`/usr/lib/…`), but `--link2symlink` uses host-absolute targets in
+ * the rootfs's `/root/.l2s`. Rebase those targets before following each link
+ * in the guest world, not by Android.
  *
  * With the engine in the system container, its own rootfs (`filesDir/system/rootfs`)
  * is the guest root, and only the paths it shares with PRoot's (SystemContainer.SHARED:
@@ -29,9 +29,14 @@ object GuestFiles {
 
     /** Host file for an absolute guest [path]; null when it is not a readable regular file. */
     fun resolve(context: Context, path: String): File? {
-        if (!path.startsWith("/")) return null
-        val rootfs = rootfs(context)
         val system = if (RuntimeController.get(context).engineInSystemContainer()) SystemContainer.layout(context).rootfs else null
+        return resolve(rootfs(context), path, PhoneStorage.hostRoot(), system)
+    }
+
+    /** [system]: the system container's rootfs, when the engine runs there. */
+    internal fun resolve(rootfs: File, path: String, phoneRoot: String, system: File? = null): File? {
+        if (!path.startsWith("/")) return null
+        val rootPaths = listOf(rootfs.absolutePath, rootfs.canonicalPath)
         val pending = ArrayDeque(segments(path))
         val resolved = ArrayList<String>()
         var links = 0
@@ -42,15 +47,18 @@ object GuestFiles {
                 ".." -> { if (resolved.isNotEmpty()) resolved.removeAt(resolved.size - 1); continue }
             }
             resolved += segment
-            val host = hostOf(rootfs, system, resolved)
+            val host = hostOf(rootfs, resolved, phoneRoot, system)
             val nio = host.toPath()
             if (!Files.isSymbolicLink(nio)) continue
             if (++links > MAX_LINKS) return null
-            val target = try { Files.readSymbolicLink(nio).toString() } catch (_: Exception) { return null }
+            var target = try { Files.readSymbolicLink(nio).toString() } catch (_: Exception) { return null }
             resolved.removeAt(resolved.size - 1)
             if (target.startsWith("/")) {
-                // A link that already names a host path (the shared storage) needs no mapping.
-                if (target.startsWith(PhoneStorage.hostRoot())) {
+                val root = rootPaths.firstOrNull { target == it || target.startsWith("$it/") }
+                if (root != null) {
+                    // PRoot l2s links name the host rootfs, not another guest /data/... path.
+                    target = target.removePrefix(root)
+                } else if (target.startsWith(phoneRoot)) {
                     val rest = pending.joinToString("/")
                     val file = if (rest.isEmpty()) File(target) else File(target, rest)
                     return file.takeIf { it.isFile && it.canRead() }
@@ -59,16 +67,16 @@ object GuestFiles {
             }
             segments(target).reversed().forEach { pending.addFirst(it) }
         }
-        val file = hostOf(rootfs, system, resolved)
+        val file = hostOf(rootfs, resolved, phoneRoot, system)
         return file.takeIf { Files.isRegularFile(it.toPath(), LinkOption.NOFOLLOW_LINKS) && it.canRead() }
     }
 
     /** Host path of resolved guest [segments] (no symlinks left to follow in them); [system]: the system container's rootfs. */
-    internal fun hostOf(rootfs: File, system: File?, segments: List<String>): File {
+    internal fun hostOf(rootfs: File, segments: List<String>, phoneRoot: String, system: File? = null): File {
         val guest = "/" + segments.joinToString("/")
         val phone = PhoneStorage.GUEST_PATH
         return when {
-            guest == phone || guest.startsWith("$phone/") -> File(PhoneStorage.hostRoot() + guest.removePrefix(phone))
+            guest == phone || guest.startsWith("$phone/") -> File(phoneRoot + guest.removePrefix(phone))
             guest == "/storage" || guest.startsWith("/storage/") -> File(guest)
             system != null && SystemContainer.SHARED.none { guest == "/$it" || guest.startsWith("/$it/") } ->
                 File(system, guest.removePrefix("/"))

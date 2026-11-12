@@ -44,7 +44,8 @@ class WebRtcTransport implements SecureHandshakeTransport {
   /// [RelayTransport.connect] with non-empty [RelayTransport.directTransports].
   ///
   /// [iceServers] fetches the connection's STUN / TURN servers; when it fails
-  /// or takes longer than 5 s, direct candidates are still tried. TURN is
+  /// or exceeds [iceServersTimeout] (10 s by default), direct candidates are
+  /// still tried. Each new attempt fetches its own credentials. TURN is
   /// dropped unless `transport.turn` was negotiated. [timeout] is the local
   /// negotiation deadline; the Server's `webrtcFallbackTimeoutMs` wins when
   /// longer, within a 15 s safety ceiling.
@@ -57,11 +58,12 @@ class WebRtcTransport implements SecureHandshakeTransport {
     required RemotePeerConnector connector,
     required Future<List<RemoteIceServer>> Function(String connectionId) iceServers,
     Duration timeout = const Duration(seconds: 8),
+    Duration iceServersTimeout = const Duration(seconds: 10),
     bool relayOnly = false,
   }) async {
     final transport = WebRtcTransport._(control).._relayOnly = relayOnly;
     try {
-      await transport._negotiate(connector, iceServers, timeout);
+      await transport._negotiate(connector, iceServers, timeout, iceServersTimeout);
       return transport;
     } on Object catch (error) {
       await transport._abort();
@@ -76,6 +78,7 @@ class WebRtcTransport implements SecureHandshakeTransport {
   RemoteTransportMode _mode = RemoteTransportMode.p2p;
   RemoteTransportMode? _actualMode;
   Duration? _roundTripTime;
+  RemotePeerNetworkInfo? _peerNetwork;
   bool _relayOnly = false;
   bool _answering = false;
   final RtcChunkCodec _outgoing = RtcChunkCodec();
@@ -101,6 +104,7 @@ class WebRtcTransport implements SecureHandshakeTransport {
 
   RemoteTransportMode? get actualMode => _actualMode;
   Duration? get roundTripTime => _roundTripTime;
+  RemotePeerNetworkInfo? get peerNetwork => _peerNetwork;
 
   /// Reads native stats only; no network probe, and a stalled platform call
   /// cannot hold up the caller. Stats after close are never consulted.
@@ -112,9 +116,11 @@ class WebRtcTransport implements SecureHandshakeTransport {
       if (_closed) return;
       _actualMode = selectedPeerPath(stats);
       _roundTripTime = selectedPeerRoundTripTime(stats);
+      _peerNetwork = selectedPeerNetworkInfo(stats);
     } on Object {
       _actualMode = null;
       _roundTripTime = null;
+      _peerNetwork = null;
     }
   }
 
@@ -125,6 +131,7 @@ class WebRtcTransport implements SecureHandshakeTransport {
     RemotePeerConnector connector,
     Future<List<RemoteIceServer>> Function(String connectionId) fetchIceServers,
     Duration localTimeout,
+    Duration iceServersTimeout,
   ) async {
     final opening = _opening = Completer<void>();
     // Awaited below; failures may land before that.
@@ -141,7 +148,7 @@ class WebRtcTransport implements SecureHandshakeTransport {
     final connectionId = _control.info.connectionId;
     var servers = const <RemoteIceServer>[];
     try {
-      servers = await fetchIceServers(connectionId).timeout(const Duration(seconds: 5));
+      servers = await fetchIceServers(connectionId).timeout(iceServersTimeout);
     } on Object {
       // No STUN / TURN: host candidates can still reach a Host on the LAN.
     }
@@ -235,7 +242,7 @@ class WebRtcTransport implements SecureHandshakeTransport {
     );
     // A native creation can finish after the deadline closed this attempt.
     if (_closed) {
-      unawaited(peer.close().catchError((Object _) {}));
+      unawaited(_closePeer(peer));
       _check();
     }
     _peer = peer;
@@ -281,6 +288,7 @@ class WebRtcTransport implements SecureHandshakeTransport {
         final stats = await peer.stats().timeout(const Duration(milliseconds: 250));
         path = selectedPeerPath(stats) ?? path;
         _roundTripTime = selectedPeerRoundTripTime(stats);
+        _peerNetwork = selectedPeerNetworkInfo(stats);
       } on Object {
         // Stats are diagnostics: the path still works without them.
       }
@@ -433,8 +441,19 @@ class WebRtcTransport implements SecureHandshakeTransport {
     _control.onSignal = null;
     _incoming.reset();
     _outgoing.reset();
-    unawaited(_peer?.close().catchError((Object _) {}));
+    // Native failure and negotiation abort can both release the same attempt.
+    final peer = _peer;
+    _peer = null;
+    if (peer != null) unawaited(_closePeer(peer));
     unawaited(_control.close());
+  }
+
+  Future<void> _closePeer(RemotePeerConnection peer) async {
+    try {
+      await peer.close();
+    } on Object {
+      // Even a synchronous platform error must not skip Control cleanup.
+    }
   }
 
   Future<void> _abort() async {

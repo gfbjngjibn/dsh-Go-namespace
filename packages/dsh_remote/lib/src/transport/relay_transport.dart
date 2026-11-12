@@ -17,7 +17,22 @@ import 'transport.dart';
 /// for tests.
 typedef ControlSocketConnector = Future<WebSocket> Function(Uri url, Duration timeout);
 
-Future<WebSocket> _defaultConnector(Uri url, Duration timeout) => WebSocket.connect(url.toString()).timeout(timeout);
+Future<WebSocket> _defaultConnector(Uri url, Duration timeout) {
+  var expired = false;
+  // timeout does not cancel the opening Future. Keep ownership of a socket
+  // that arrives after the caller has already received the timeout.
+  final opening = WebSocket.connect(url.toString()).then((socket) {
+    if (expired) unawaited(socket.close(WebSocketStatus.normalClosure).catchError((Object _) {}));
+    return socket;
+  });
+  return opening.timeout(
+    timeout,
+    onTimeout: () {
+      expired = true;
+      throw TimeoutException('Future not completed', timeout);
+    },
+  );
+}
 
 /// Diagnostic hook: every Control frame in or out, and Relay data frames as
 /// `data-in` / `data-out` (tokens, tickets and ciphertext redacted).
@@ -69,6 +84,10 @@ class RelayTransport implements SecureHandshakeTransport {
   /// retry once), `HOST_OFFLINE`, `MEMBERSHIP_REQUIRED`,
   /// `CAPABILITY_NOT_SUPPORTED`, `CONNECTION_REJECTED` (Host refused),
   /// `INVALID_MESSAGE` (protocol violation).
+  ///
+  /// [isCancelled] retires an owner's pending socket before it can send hello.
+  /// A socket that arrives after cancellation is closed without authentication;
+  /// this does not retract a hello that was already sent.
   static Future<RelayTransport> connect({
     required Uri url,
     required String deviceId,
@@ -77,10 +96,14 @@ class RelayTransport implements SecureHandshakeTransport {
     String? clientVersion,
     Duration timeout = const Duration(seconds: 10),
     ControlSocketConnector? connector,
+    bool Function()? isCancelled,
     ControlTracer? tracer,
     bool offerDirect = false,
     List<RemoteTransportMode>? preferredTransports,
   }) async {
+    if (isCancelled?.call() == true) {
+      throw const RemoteTransportException('CLIENT_CLOSED', 'The connection owner closed.', retryable: false);
+    }
     final connect = connector ?? _defaultConnector;
     final WebSocket socket;
     try {
@@ -99,6 +122,10 @@ class RelayTransport implements SecureHandshakeTransport {
       throw RemoteTransportException('CONNECTION_FAILED', 'Control WebSocket connect failed: ${error.message}');
     } on HandshakeException catch (error) {
       throw RemoteTransportException('CONNECTION_FAILED', 'TLS handshake failed: ${error.message}');
+    }
+    if (isCancelled?.call() == true) {
+      unawaited(socket.close(WebSocketStatus.normalClosure).catchError((Object _) {}));
+      throw const RemoteTransportException('CLIENT_CLOSED', 'The connection owner closed.', retryable: false);
     }
     final transport = RelayTransport._(
       socket,

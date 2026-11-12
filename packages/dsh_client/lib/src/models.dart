@@ -120,6 +120,28 @@ class ImageAttachment {
   final int? height;
   final String? name;
   final Map<String, Object?> raw;
+
+  Map<String, Object?> toJson() => {
+    'attachmentId': attachmentId,
+    'mediaType': mediaType,
+    'bytes': ?bytes,
+    'width': ?width,
+    'height': ?height,
+    'name': ?name,
+  };
+
+  @override
+  bool operator ==(Object other) =>
+      other is ImageAttachment &&
+      attachmentId == other.attachmentId &&
+      mediaType == other.mediaType &&
+      bytes == other.bytes &&
+      width == other.width &&
+      height == other.height &&
+      name == other.name;
+
+  @override
+  int get hashCode => Object.hash(attachmentId, mediaType, bytes, width, height, name);
 }
 
 class FileAttachment {
@@ -218,6 +240,32 @@ class Message {
 
   /// Concatenated visible text (text parts only).
   String get text => parts.whereType<TextPart>().map((p) => p.text).join();
+
+  /// Explicit final-answer text in the known pi-ai v2 replay format.
+  /// Text blocks are joined for display, so any final block keeps the message.
+  bool get isFinalAnswer {
+    if (role != MessageRole.assistant || source.kind != 'model') return false;
+    final replay = asMap(source.raw['replayState']);
+    final response = asMap(replay?['response']);
+    final blocks = asList(replay?['blocks']);
+    if (response?['kind'] != 'pi-ai' || response?['version'] != 2 || blocks == null || blocks.length != parts.length) {
+      return false;
+    }
+    for (var i = 0; i < parts.length; i++) {
+      final part = parts[i];
+      if (part is! TextPart || part.text.trim().isEmpty) continue;
+      final block = asMap(blocks[i]);
+      if (block?['type'] != 'text') continue;
+      final signature = asString(block?['textSignature']);
+      final metadata = signature == null ? null : asMap(tryDecodeJson(signature));
+      if (metadata?['v'] == 1 &&
+          metadata?['phase'] == 'final_answer' &&
+          (asString(metadata?['id'])?.isNotEmpty ?? false)) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   String get reasoning => parts.whereType<ReasoningPart>().map((p) => p.text).join();
 
@@ -447,6 +495,37 @@ class ModelSelection {
 
   @override
   String toString() => '$provider/$model${reasoningEffort == null ? '' : ' ($reasoningEffort)'}';
+}
+
+/// Saving the next-session default is separate from switching this session.
+enum ModelDefaultSaveStatus { saved, skipped, failed, unknown }
+
+class ModelDefaultSave {
+  const ModelDefaultSave({required this.status, this.code});
+
+  static ModelDefaultSave? fromJson(Object? json) {
+    final map = asMap(json);
+    if (map == null) return null;
+    final status = switch (asString(map['status'])) {
+      'saved' => ModelDefaultSaveStatus.saved,
+      'skipped' => ModelDefaultSaveStatus.skipped,
+      'failed' => ModelDefaultSaveStatus.failed,
+      _ => ModelDefaultSaveStatus.unknown,
+    };
+    return ModelDefaultSave(status: status, code: asString(map['code']));
+  }
+
+  final ModelDefaultSaveStatus status;
+  final String? code;
+}
+
+class ModelSelectionResult {
+  const ModelSelectionResult({required this.selected, this.defaultSave});
+
+  final ModelSelection selected;
+
+  /// Null for older hosts that do not acknowledge default persistence.
+  final ModelDefaultSave? defaultSave;
 }
 
 class TodoItem {

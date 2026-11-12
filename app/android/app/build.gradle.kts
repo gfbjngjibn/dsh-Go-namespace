@@ -12,6 +12,13 @@ val keyProps = Properties().apply {
     rootProject.file("key.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
 }
 
+// Debug builds use the release key only when it is all there; they are never the build
+// that should stop over a half-filled key.properties.
+// A password may be nothing but spaces; a path or an alias may not.
+val hasWholeReleaseKey = listOf("storeFile", "keyAlias").all { !keyProps.getProperty(it).isNullOrBlank() } &&
+    listOf("storePassword", "keyPassword").all { !keyProps.getProperty(it).isNullOrEmpty() } &&
+    file(keyProps.getProperty("storeFile")).exists()
+
 // Per-ABI runtime bundles produced by runtime/build-runtime.sh.
 val runtimeOut = rootProject.file("../../runtime/out")
 
@@ -105,6 +112,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            // tooling/dev-run.sh installs debug over the release build on a phone, data
+            // kept: Android only allows that with the same key.
+            if (hasWholeReleaseKey) signingConfig = signingConfigs.getByName("release")
+        }
         release {
             // Use the release key when configured; local builds without key.properties fall back to debug.
             signingConfig = signingConfigs.getByName(if (keyProps.isEmpty) "debug" else "release")
@@ -126,7 +138,11 @@ flutter {
 }
 
 dependencies {
+    // Bundled Chinese OCR. SDK statistics disclosed separately; initialization is opt-in per use.
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     testImplementation("junit:junit:4.13.2")
+    // Android stubs do not implement JSONObject in local JVM upgrade tests.
+    testImplementation("org.json:json:20240303")
 
     // .tar.xz support for the rootfs bundle.
     implementation("org.tukaani:xz:1.10")

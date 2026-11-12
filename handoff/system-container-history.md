@@ -1011,3 +1011,178 @@ git show <树>:<文件>                                  # 看带冲突标记的
 - 顺序：先解决三个保留两边的大类和生成物，再做 `PhoneBridge`/`GuestFiles`/`DshProcess`/`CrashClassifier`，最后 `RuntimeController` 和 `rtbuild.py`（先读上游这两处的完整新版本）。
 - 合完的验证：Kotlin 全量、Dart 全量（本机有 43 个截图/外网测试本来就失败，要对照）、`flutter analyze`、`l10n_merge --check`、`guide_sync --check`、`node --test runtime/tests`；`runtime/build-runtime.sh arm64-v8a`（上游的分层构建第一次跑可能要下载新的钉死包）和 `--system-only`；打 APK；真机：系统容器全套（历史 §10、§12 的验收）、兼容启动、启动失败回退、引擎升级。
 - 工作量：解决冲突大半天，加构建和真机回归，一个完整会话以上。上游每天几十个提交，开工前重新 fetch、重跑 `merge-tree`。
+
+## 16. 合并上游（进行中，2026-11-12，第十个会话）
+
+用户要求开始合并，中途说"难的留一下"，交给下一个会话。**合并没完成、没提交**：工作区处在 `git merge` 进行中的状态（有 `MERGE_HEAD`），剩 2 个文件带冲突标记。
+
+### 现在的状态
+
+- `git fetch origin` 后 `origin/main` = `e73000e3`（比 §15 评估时的 `708bdc32` 多 5 个提交：更新下载重定向、bridge 补报占用、direct 下 media 暂存目录；和我们改过的文件没有交集，冲突清单不变）。分叉点仍是 `bf62b596`，上游 1342 个提交。
+- 执行的是 `git merge --no-commit --no-ff origin/main`。**不要 `git merge --abort`**（已解决的 14 个文件会丢）；单个文件想重来用 `git checkout -m <文件>`（重建冲突标记，标记写作 `ours`/`theirs`）。
+- 已解决并 `git add` 的 14 个文件，`git diff --name-only --diff-filter=U` 只剩：
+  - `app/android/app/src/main/kotlin/io/github/ccch1mneyyy/dsh_app/runtime/RuntimeController.kt`（3 块，见下）
+  - `runtime/lib/rtbuild.py`（6 块，没动）
+- 已跑：`python3 app/tool/guide_sync.py --check`、`python3 app/tool/l10n_merge.py --check`（要先 `source ~/dev/env.sh`，否则报 flutter not found）都通过；重新生成的 `app_*.arb`、`gen/*.dart` 和自动合并结果一致。**Kotlin、Dart 都还没编译过**（RuntimeController 有标记）。
+
+### 已解决的 14 个文件怎么合的
+
+| 文件 | 做法 |
+|---|---|
+| `engine_screen.dart` | 两边都留：import 两个；`SystemContainerSection()` 在前，上游的 `if (!missing) WorkspaceRecoverySettings()` 在后 |
+| `res/values{,-zh}/i18n_strings.xml` | 用上游改过的 `service_stop_phone`/`service_stop`（「停止手机操控」「停止引擎」，上游 `17e0d40e`），后面接我们的 `service_quit` 和 6 个 `quit_*` |
+| `dsh-go-support/SKILL.md` | 用上游改写后的那句（不再逐项列诊断内容）；我们的 `proot/direct/system` 在下面的环境模板和「引擎起不来」两条里还在 |
+| `docs/guide/{zh,en}/11-faq.md` | 两节都留：上游的 headless `MISSING_CREDENTIAL` 在前，我们的「用系统容器跑引擎」在后；`app/assets/skills/dsh-go-guide/*-11-faq.md` 由 `guide_sync.py` 重新生成 |
+| `ProcessLaunchGuardTest.kt` | `allowedNative` 里上游的三项（AndroidShellProcess、`diagnosticJavaOwner`、`updateJavaOwner`）在前，我们的 `RootShell.kt` 在后 |
+| `GuestFiles.kt` | 以上游为底（`resolve(rootfs, path, phoneRoot)` + l2s 绝对目标重定位），加一个默认参数 `system: File? = null`：`resolve(context, path)` 里算出系统容器 rootfs 传进去；`hostOf(rootfs, segments, phoneRoot, system)` 改成 `internal`，`SystemContainer.SHARED` 以外的路径映射到系统容器的 rootfs。系统容器模式下 `/root` 里 proot 留下的 l2s 链接：目标是 proot rootfs 的宿主绝对路径，先剥成 `/root/.l2s/…`，再按 SHARED 映射回 proot rootfs，所以照常能解析 |
+| `GuestFilesTest.kt`（add/add） | 上游的整份 + 我们原来的两个 `hostOf` 测试（改成新签名）+ 新加一个 `resolve` 测试：系统容器模式下 `/root` 的 l2s 链接解析到 proot rootfs、`/srv/…` 解析到容器 rootfs |
+| `CrashClassifier.kt` | 上游的 `PROOT_EXEC_FAILED`/`PROOT_ASSERT_FAILED` 只在 `!directEngine && !systemEngine` 时算（系统容器模式下 `direct` 是 false，不加这个条件会把 proot 的错误当成系统容器的启动证据）；我们的 `SYSTEM_FAILED` 照旧 |
+| `DshProcess.kt` | `start()` 参数顺序：`…, directFailed, systemEngine, systemFailed, searchOverlay, authOverlay, speechOverlay, onLaunchMethod`（调用处要按这个顺序传，见下面第 2 块）；日志泵 `listener.onLog(line, stream, redactor.line(line))` 后面接我们的 `execPid` |
+| `PhoneBridge.kt` | 我们的 `forgetBridge` + `acceptTcp(…, containerOnly)`，循环条件和日志条件换成上游的 `current(token)` |
+| `RuntimeController.kt` 第 1 块 | 两边都留：我们 161 行系统容器函数在前，上游的 `setWorkspaceRecovery` 在后（自动解决时 `quit()` 的两个右括号落在冲突外面，已补回） |
+| `RuntimeController.kt` 第 4 块（`reset`） | 两边都留，**先停容器、再跑上游的 `reapStrays()` 检查**：容器的 `/root` 和 DSH 层是绑进要删的 rootfs 的；顺序反过来的话，万一容器进程让观测不完整，reset 会一直报 "runtime stop incomplete" |
+
+### 留给下一个会话的：`RuntimeController.kt` 剩下的 3 块
+
+上游重写了启动的生命周期：`DshProcess` 在 `synchronized(this@RuntimeController)` 里创建并发布（先查 `stopGen`/`gen`），监听器是一个按代收集 `runTail` 的委托对象；启动失败走 `failStart → onStartupFailure → publishStartupFailure`；有 180 秒的 token 超时（`startupTokenTimedOut`、`classifyAfterTokenTimeout`，#75）。我的分析和建议（没实现、没编译）：
+
+- **第 2 块（启动 worker，约 711 行）**：git 把我们的 `prepareSystemContainer` 那段放在了上游发布 `p` 的块**之后**，要挪到**之前**——容器启动期间 `process` 必须还是 null（这样期间的停止走 `stopProcess` 里 `process == null && STARTING` 那条，排在 worker 后面收尾）。大致形状：
+  ```kotlin
+  val system = systemEngine()
+  if (system.requested && !safe) {
+      val ready = runCatching { synchronized(systemLock) { prepareSystemContainer(if (storage) PhoneStorage.binds() else emptyList()) } }
+      if (ready.isFailure) {
+          PhoneControl.get(app).onEngineStopped()
+          synchronized(this) { if (stopGen < gen && gen == runGen) systemLaunchFailed(ready.exceptionOrNull()?.message ?: "container start") }
+          return@execute
+      }
+  }
+  val p = synchronized(this@RuntimeController) { /* 上游原样：检查 stopGen/gen 后发布 */ } ?: run { … }
+  timeline.spawned()
+  val direct = directEngine()
+  p.start(env, binds, safe, phone, direct.requested, direct.failed, system.requested, system.saved && system.failed,
+      searchOverlay, authOverlay, speechOverlay) { actualDirect ->
+      if (!safe) GuestSetup.writeAgentsMd(installer.rootfs, storage, phone, pendingVisualReplies, actualDirect, p.system)
+  }
+  ```
+  容器准备成功但期间被停：交给上游发布块里的 `stopGen >= gen` 检查。
+- **第 3 块（启动的 catch）**：以上游的 `synchronized(this) { … }` 为底，在"取消了就返回"之后、`publishStartupFailure` 之前插入 `if (launched?.system == true && stopGen < gen) { systemLaunchFailed(…); return@execute }`。**要核对一个竞态**：`failStart` 会 `main.post` 一个 `publishStartupFailure(ownerReleased = false)`，它在 `source !== process` 时什么都不做；但如果它先于 worker 把 `process` 置 null 跑了，phase 会变成 STOPPING，而 `systemLaunchFailed → restartNow → startProcess()` 遇到 STOPPING 会直接返回，回退就没发生。
+- **第 5 块（`onExit`）**：以上游为底，`classify(…, source.direct, source.system)`；在 `expected || stopGen >= runGen` 那个返回之后、Direct 回退之前放回 `if (SafePolicy.directLaunchFailed(f, source.system)) { systemLaunchFailed(f.summary ?: "exit $code"); return }`。`dshns exec` 自己失败时没有 `startupError`，`publishStartupFailure` 返回 false，会走到这里；token 超时且尾部有 `[dshns]` 行时 `classifyStartup` 为真，也会走到这里。
+
+### 留给下一个会话的：`rtbuild.py`
+
+照 §15：以上游的 `write_archive`/`partition_entries` 为准，把我们 `write_tar(..., owners=True)`（`cmd_system_image` 用）接上去。**验证用的参照已存好**：`runtime/.cache/merge-ref/`（gitignored）里有合并前系统镜像 `system-arm64-v8a.tar.xz` 的 sha256、`tar --numeric-owner -tvJf` 清单（23664 行，非 root 属主 26 条）、`system.json`、`system-report.json`。合完跑 `runtime/build-runtime.sh --system-only arm64-v8a`，清单应完全一致（最好镜像版本号 `s1-ubuntu-noble-20261018_1335-2b194891b81e` 也不变，那样设备上不会重新解压）。`--system-only` 会覆盖 `runtime/out/arm64-v8a` 里的那份，所以参照放在了外面。
+
+### 自动合并里看过的
+
+- `GuestSetup.kt`：`writeAgentsMd(…, systemEngine)` 还在；`PROOT_ENVIRONMENT`、`PROOT_SANDBOX_ADVICE`、`APT_LINE_END` 三个替换锚点在上游的提示词里都还在（`GuestAgentsModeTest` 有断言，编译后跑一下就知道）。
+- `build-runtime.sh`：`PROOT_VERSION` 仍是我们的 `5.1.107.102`（上游 `.98`，已下架）。
+- `DshService.kt` 常驻通知的「退出」、`AndroidManifest.xml` 的 `QuitActivity` 都还在。
+- 没看的：`PhoneControl.kt`（上游 +590）、`PhoneGuest.kt`、`diagnostics_page.dart`、`runtime_bridge.dart`、`RuntimePlugin.kt`——交给编译和测试。
+
+### 上游新加的 `killStrays()` 关卡和系统容器
+
+上游在 `install()`（运行时升级前）、`reset()`、`checkRecoveryWrite()`（恢复上次正常配置、移走文件、工作区恢复开关）里都要求 `DshProcess.killStrays()` 完整观测到"没有残留进程"，否则拒绝。担心的是容器里的进程（宿主上是 App uid、ksu 域，App 读不了它们的 `/proc`）会让观测一直不完整，容器开着就升级不了、恢复不了。**设备上的证据说多半没事**：平板 `files/runtime/logs/dsh.log` 里 71 次启动（含多次 `launch method: system`），没有一行 "cleanup incomplete" 或 "incomplete process observation"，也就是容器开着时 App 的观测是完整的（§5 / 历史第 354 行那条"系统容器模式下会出现 incomplete process observation"看来是旧的，合完验证后可以删）。仍要上机测：容器开着时装一个 runtime 版本不同的 APK（升级会不会被 `RuntimeUpgradeBlocked("running")` 挡住）、reset、恢复上次正常配置。
+
+### 合完要做的（同 §15）
+
+Kotlin 全量（`cd app/android && ./gradlew :app:testArm64DebugUnitTest`）、Dart 全量（沙箱外跑，对照本来就失败的 43 个）、`flutter analyze`、`l10n_merge --check`、`guide_sync --check`、`node --test runtime/tests/*.test.mjs`；`runtime/build-runtime.sh arm64-v8a`（上游的双层构建）和 `--system-only`；打 APK；真机回归系统容器全套 + 兼容启动 + 启动失败回退 + 容器开着时引擎升级。验完再问用户要不要提交合并（提交信息里写上合并的上游 SHA）。
+
+## 17. 合并上游：剩下的冲突（2026-11-12，第十一个会话，已暂存、没提交）
+
+用户因额度中途叫停，本节是收尾时的状态。**冲突全部解决并 `git add`，合并没提交，没装到平板上。**
+
+### `RuntimeController.kt` 第 2、3、5 块
+
+- **第 2 块**：`prepareSystemContainer` 挪到上游发布 `process` 的同步块**之前**（条件多了 `stopGen < gen && gen == runGen`：已经被停就不起容器，下面的发布块会拒绝这次启动）。失败时在控制器的锁里判断没被停再调 `systemLaunchFailed`。`p.start(…)` 按 `directFailed, systemEngine, systemFailed, searchOverlay, authOverlay, speechOverlay` 的顺序传；`writeAgentsMd` 保留上游的 `if (!safe)` 并带 `p.system`。
+- **第 3 块（catch）**：以上游的 `synchronized(this)` 为底，在"取消了就返回"之后、`publishStartupFailure` 之前：`if (launched?.system == true && stopGen < gen) { systemLaunchFailed(…); return@execute }`。
+- **第 5 块（`onExit`）**：`classify(…, source.direct, source.system)`；`expected || stopGen >= runGen` 返回之后、Direct 回退之前放回系统容器的回退。
+- **§16 担心的竞态是真的，已处理**：`failStart` 会先 `main.post` 一个 `publishStartupFailure(ownerReleased = false)`，把 phase 置成 STOPPING，而 `restartNow → startProcess()` 遇到 STOPPING 直接返回，回退不会发生。`systemLaunchFailed` 里加了 `if (phase != Phase.STARTING) setPhase(Phase.STARTING)`（调用方都持有控制器的锁、已把 `process` 置空，那个 post 之后再跑也是空操作）。
+- **上游自己有同一个毛病，没动**：token 超时（180 秒）之后走 Direct 回退或"自动进安全模式重启"的两条路也是 `restartNow`，同样会卡在 STOPPING（按一次停止能恢复）。不在这次合并的范围里。
+
+### `rtbuild.py`
+
+以上游的 `write_archive(entries, out, args, *, layered=False)` 为准，加了关键字参数 `owners=False`（系统镜像用 `owners=True` 保留属主）；我们的 `write_tar` 删掉，`normalize_tree`、`register_deb` 保留（上游没动那两段内联代码）。`system-image` 子命令加了 `--gzip-level`（默认 9）；`cmd_system_image` 里 `del stats["origins"]`（那是运行时的来源统计）。
+**验证**：用合并前的 `--image-info` 直接跑合并后的 `rtbuild.py system-image`，产物 sha256 `d6a714d1…4630`，与 `runtime/.cache/merge-ref/` 的参照逐字节相同，`system.json`、`system-report.json` 也相同。
+**镜像版本号一定会变**（§16 说"最好不变"做不到）：版本号的输入里有 `build-runtime.sh` 和 `rtbuild.py` 自身的 sha256。设备上已解压的旧镜像不会被替换，所以没有影响。
+
+### git 没报冲突、测试才暴露的两处（`build-runtime.sh`）
+
+上游新加了输入清单 `runtime/lib/input_store.py`：读 `PIN` 表，要求每个默认输入都有 PIN、表里也不能有它不认识的条目。
+- **proot**：我们本地钉的 `5.1.107.102` 原来没有 PIN。把表里三条 `.98` 换成 `.102`：aarch64 `10a394b5…e030`、x86_64 `24970642…7758`（都取自 Termux 当前的 Packages 索引，aarch64 与缓存一致），源码包 `30d12a6e…0852`（缓存的那份，又从 GitHub 重新下载核对过）。`runtime/tests/test_input_store.py` 第 65 行引用的 PIN 名同步改成 `.102`。上游仍钉 `.98`，靠它自己的"自留输入仓"（`RUNTIME_INPUT_STORE_URL`，不公开）取。
+- **LXC 镜像**：校验和从 `PIN` 挪到独立的 `SYSTEM_PIN` 表（`lxc_image`、`build_system` 跟着改），上游的文件不用动。
+- 顺带更正 §15/§16：上游的分层构建是 `RUNTIME_LAYERS=1` 才开，**默认仍是单包**（`rootfs-<abi>.tar.xz`）。
+
+### 验证到哪了
+
+- 过了：Kotlin 编译；`./gradlew :app:testArm64DebugUnitTest` 2288 个、0 失败；`flutter analyze` 无问题；`l10n_merge --check`、`guide_sync --check`；`python3 -m unittest discover -s runtime/tests -p 'test_*.py'` 99 个全过（改 PIN 之前失败 12 个）；`tooling` 的 113 个全过。两边都改过的 34 个文件逐个核对过：我们加的行除有意改写的以外都在。
+- **没跑完 / 没归因**：Dart 全量（收尾时还在跑，跑到约 6000 个时失败 11 个：account/drawer/wiring 的截图比对、`remote_bootstrap_test`、`ssh_link_test`、`voice_model_cancel_owner_test`，都不在我们改过的目录里，还没和上游基线对比）；`runtime/build-runtime.sh arm64-v8a`（收尾时在压 rootfs，DSH 0.2.2-rc.1 已装好并打完补丁）。
+- 没跑：`app/tool` 的 `test_make_pet_pack`（本机没有 numpy，其余 75 个过）；`node --test runtime/tests/*.test.mjs` 不设 `DSH_PREFIX` 时 989 个里失败 229 个，原因都是缺打好补丁的 DSH 安装（上游加了很多这类测试；CI 的做法见 `.github/workflows/ci.yml` 第 224–264 行）。
+- Dart 依赖要按锁文件取：`env.sh` 的镜像地址会让 `flutter pub get` 重新解析并升级一批包。做法：`sed -i 's#https://pub\.dev#https://pub.flutter-io.cn#' app/pubspec.lock && (cd app && flutter pub get --enforce-lockfile)`，用完 `git checkout -- app/pubspec.lock`。
+
+### 接着做
+
+1. 确认运行时构建成功（`runtime/out/arm64-v8a`），Dart 全量跑完后把失败项和上游对比（`git archive origin/main` 解到临时目录跑同样的文件）。
+2. `tooling/build-apk.sh -f arm64`。
+3. **问用户**什么时候装到平板上（会重启容器、升级运行时），然后真机回归：系统容器全套、兼容启动、启动失败回退（现在有三处入口：容器起不来、`dshns exec` 失败、token 超时带 `[dshns]` 行）、容器开着时升级运行时 / reset / 恢复上次正常配置（上游的 `killStrays()` 关卡）。
+4. 验完问用户要不要提交合并（提交信息写上游 SHA `e73000e3`）。`THIRD_PARTY_NOTICES.md` 里 proot 还写着 `.98`（合并前就是这样），要不要改由用户定。
+
+**收尾后补记**：`runtime/build-runtime.sh arm64-v8a` 成功（退出码 0）。运行时 `r15-dsh0.2.2-rc.1-node24.22.1-ubuntu24.04.5-2caa7df10841`（proot 5.1.107.102，153M）；系统镜像 `s1-ubuntu-noble-20261018_1335-927457fdb613`（99M）。`runtime/out/arm64-v8a` 已是合并后的产物，「接着做」第 1 步只剩 Dart 失败项归因。
+
+**Dart 全量跑完**（13899 个，失败 48 个，分布在 18 个文件，清单在 `runtime/.cache/merge-ref/dart-fails-merged.txt`）：多数是截图比对（account、chat、drawer、wiring、onboarding、shell、share_landed、wallpaper），另有 `remote_bootstrap`、`ssh_link`、`voice_model_cancel_owner`、`update_retry_phase`、`usage_ui`、`guide_nav`、`chat_features`、`empty_actions`、`model_sheet`。**没有一个落在我们改过的目录**（engine、runtime、l10n、diagnostics、engine_settings、files）。合并前的基线是 43 个；还没和上游 `e73000e3` 本身对比（跑的时候同时在构建运行时，超时类的可能是负载造成的）。
+
+**Dart 失败项归因（额度重置后接着做的）**：把上游 `e73000e3` 用 `git archive MERGE_HEAD app packages` 导出到临时目录，两棵树各自单独跑那 18 个文件（依赖都按锁文件取）。结果：合并树 47 个失败、上游 47 个失败，文件和个数逐一相同，只有两个文件不同——`voice_model_cancel_owner_test`、`update_retry_phase_test`，各再跑四遍，**在上游的树上也时过时不过**（退出码：合并树 `1 0 0 1` / `0 1 0 0`，上游 `0 1 1 1` / `0 1 0 0`），是不稳定的测试。结论：Dart 全量里没有合并引入的失败。
+
+### 真机回归（2026-11-12 晚，APK 11121729 / 1.0.15，sha256 `a4b95b40…4813`）
+
+用户选了"先备份再装""回归通过后提交并推送"。做到一半用户叫停（额度），**没提交**。
+
+- **备份**：停引擎 → 引擎页「备份系统容器」→ `dsh-system-20261112-174714.tar.gz`（813 MB，34 秒）。
+- **升级**：`exec-in` + `pm install -r -t`，打开 App 后日志是 "upgrading engine; preserving installed Linux system and user tools"，12 秒完成。平板上的旧运行时没有 `upgrade` 标记，走的是上游"一次性收编"分支（Ubuntu 版本相同、Python 二进制相同就放行），只换引擎层，`/root`、对话、已装的工具都在。装的时候容器是停着的（备份停的），**"容器开着时升级"没测到**。
+- **系统容器**：`system container running`、`launch method: system`、引擎监听。容器里（`cx.sh`）：systemd running，时区 CST，`/dev/fuse`、`/dev/net/tun` 在，`/home` 和 `/var/lib/docker` 在存储上，v4/v6 地址，外网 200，`/opt/dsh` 是新引擎层，Docker（含联网）和 Podman 都能跑。无障碍服务已绑定。
+- **agent 端到端**（新对话，V4.1 Flash）：`mcp__phone__screen` 调到了 App（App 按规则拒读自己的界面，通道是通的），`su - ubuntu -c id` 正常，一轮 completed。
+- **启动失败 → 自动回退（第一次在真机上触发）**：容器停着时把 rootfs 里的 `usr/lib/systemd/systemd` 临时改名，启动引擎 → "system container launch failed (system container did not start: [dshns] no systemd in …); starting again with the next launch method" → "system container fallback: …" → `launch method: proot` → 引擎起来（用户的「直接启动」是关的，所以落到兼容启动，顺带验了新运行时的 proot）。改回名字，诊断页「系统容器启动」→ 检查页 25 项全部满足 →「开启」→ 再启动是 `launch method: system`。走到的是三处入口里的第一处（容器起不来），另外两处（`dshns exec` 失败、token 超时）没在真机上触发。
+- **界面**：引擎页里我们的「系统容器」区块和上游的「工作区索引救援」都在；诊断页的两个开关和文案正常。
+
+**回归中发现的老问题（和合并无关）**：App 读不了、删不了、换不掉**容器里建的软链接**。Android 的 SELinux 策略对 app 数据里的 `lnk_file` 要求级别完全相等（`l1 eq l2`），普通文件只要求支配；容器里的进程（ksu 域）建的东西标签是不带分类的 `app_data_file:s0`。所以 §3 那句"ksu 域创建的文件 App 仍然可以读、写、删"只对普通文件成立。
+- 实际影响：第九个会话 14:33 在容器里把 `/etc/localtime` 改到 Berlin 又改回，之后 `followTimezone` 每次启动都抛异常，日志是 "system container keeps its time zone: <路径>"（`readSymbolicLink` 被拒）。**容器里 `timedatectl set-timezone`、或者 apt 升级 tzdata（它的 postinst 会重建这个链接）都会触发**，之后时区就不再跟手机了。
+- 这次只修了设备状态：`restorecon` 那一个链接（标签回到 `s0:c90,c257,c512,c768`），之后启动不再有那行。**代码没改**。建议的改法：`followTimezone` 遇到 AccessDenied 时经 root 对那个链接 `restorecon` 再重试一次（`etc` 是不是 rootfs 自己的目录仍先由 App 检查）。要不要做由用户定。
+- 同样的原因，`GuestFiles` 沿着容器里建的软链接打开文件也会失败（rootfs 里这样的链接有 262 个，都是 apt 装包建的）。「删除系统容器」走的是 root，不受影响。
+
+**留给下一个会话的（用户说交给 Opus）**
+1. 上游 `killStrays()` 关卡在容器开着时会不会误拦：引擎停着、容器开着，切一下引擎页的「工作区索引救援」开关再切回（`sw.py` 按现在的写法找不到这个开关的 checkable 节点，要看一下 dump 里它的节点再点）。reset 会删数据，不要在用户的平板上测。
+2. 「退出 DSH Go（含容器）」走一遍（引擎页按钮和常驻通知各一次），然后重新打开 App 确认引擎、容器都回来。
+3. 都没问题就按用户已经定的做：提交合并（提交信息写上游 SHA `e73000e3`，交接文档一起提交）、推到 `fork` 的 `system-container`（沙箱外执行）。
+4. 问用户：时区那个老问题要不要按上面的建议改；`THIRD_PARTY_NOTICES.md` 的 proot 版本要不要改成 `.102`。
+5. 没做的：VPN / 熄屏 / Doze、容器开着时升级运行时（要另一个运行时版本不同的 APK）。
+
+## 18. 合并上游：收尾、提交、推送（2026-11-12 晚，第十二个会话，APK 11121729）
+
+接 §17 末尾「留给下一个会话的」。真机上做完第 1、2 项后，按用户已定的提交合并、推到 fork。
+
+### `killStrays()` 关卡（§17 第 1 项）
+
+容器开着时切引擎页「工作区索引救援」，两个方向都做了：
+
+- 引擎停着、容器开着 →「启用工作区索引救援」→「启用并重启」：没被拦，引擎以 `launch method: system` 重新起来，`DSH_APP_WORKSPACE_RECOVERY=1`。
+- 引擎开着 →「恢复使用原索引」→「使用原索引并重启」（先停引擎、容器留着，再过关卡）：没被拦，重新起来，`DSH_APP_WORKSPACE_RECOVERY=0`。救援索引按上游的设计留在磁盘上。
+- 装 1.0.15 之后（`dsh.log` 第 1985 行 "upgrading engine" 以后）多次 `system` 启动、停止，**没有一行 "cleanup incomplete" 或 "incomplete process observation"**；整份日志里的 16 行都在 11-03 的旧日志里。所以主文档 §5「系统容器模式下日志里会出现 incomplete process observation」那条删了。
+- 「工作区索引救援」这一项是个整块可点的 tile，不是开关，`sw.py` 找不到它；按坐标点 tile 的下半部（横屏约 `1700 1790`，要先在日志框外面往下滑，比如 `input swipe 2620 2300 2620 400`）。
+- 没测：reset（会删数据）、「恢复上次正常配置」（`checkRecoveryWrite(mainProfileOnly = true)`，和上面走同一个关卡）。
+
+### 「退出 DSH Go（含容器）」（§17 第 2 项）
+
+- **引擎页按钮**：确认框是原生的 `QuitActivity`（文字在 `text` 属性里）→「退出」→ 约 4 秒后 `dshns status` 是 `stopped`、App 进程没了。日志 "DSH exited with code 0" → "system container stopped"，monitor "container init killed by signal 2"（正常，见主文档 §3）。宿主：`dsh-br0` 没了、`/sys/fs/cgroup/dsh-go` 没了、`ip rule` 里没有 6060/6070、`ip_forward` 回到 0、没有残留挂载。
+- **常驻通知**：`cmd statusbar expand-notifications` 后通知里有「停止引擎」「退出」两个动作 →「退出」→ 同一个确认框 → 同样的结果，通知也消失了。注意 `ui.py tapx` 匹配不上通知按钮：它们的 `text` 和 `content-desc` 都是「退出」，节点文字是 "退出|退出"，`tapx` 比的是去掉两边 `|` 后的整串。按 dump 里的坐标点（横屏约 `1501 557`）。
+- 两次退出后用 `monkey -p … -c android.intent.category.LAUNCHER 1` 重新打开 App：容器约 0.3 秒起来（"system container running"）、`launch method: system`、引擎监听、手机操控桥在 `10.213.0.1` 上重新加上、无障碍服务绑定着。
+
+### 提交、推送（§17 第 3 项）
+
+- 合并提交前核对过：`git diff --diff-filter=U` 为空；暂存里的 `app/pubspec.lock` 和上游一字不差（不是构建改过镜像地址的那份）；合并后与上游 `e73000e3` 的差异是 67 个文件（我们原来的 66 个 + `runtime/tests/test_input_store.py` 的 PIN 名）。
+- 合并提交连同交接文档一起提交，推到 `fork` 的 `system-container`。
+
+### 还没定的（§17 第 4、5 项，已问用户）
+
+- 容器里建的软链接 App 读不了、删不了（`followTimezone` 因此会停止跟随，`GuestFiles` 沿这种链接打开文件会失败；§17「回归中发现的老问题」），要不要按 §17 的建议改。
+- `THIRD_PARTY_NOTICES.md` 里 proot 还写着 `5.1.107.98`（我们实际钉的是 `.102`），要不要改。
+- 没做：VPN / 熄屏 / Doze、容器开着时升级运行时（要另一个运行时版本不同的 APK）。

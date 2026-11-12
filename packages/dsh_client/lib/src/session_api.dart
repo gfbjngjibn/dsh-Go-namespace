@@ -17,6 +17,7 @@ import 'models.dart';
 import 'mux.dart';
 import 'rpc.dart';
 import 'rpc_envelope.dart';
+import 'workspace_upload.dart';
 
 /// `queue` waits for the next turn; `steer` injects into the running turn's
 /// next step.
@@ -296,6 +297,26 @@ class DshClient {
   /// tunnels serve a fixed allow-list; `fileUploads/upload` is not on it).
   bool supportsEndpoint(String endpoint) => carrier.allowsEndpoint(endpoint);
 
+  /// Receipt staging or the current connection's workspace upload protocol.
+  bool get supportsFileUpload =>
+      supportsEndpoint('fileUploads/upload') ||
+      (carrier is WorkspaceUploadCarrier && (carrier as WorkspaceUploadCarrier).supportsWorkspaceUpload);
+
+  /// The live connection carries the workspace upload protocol
+  /// (ds-harness-remote `workspace.upload.v1`): [uploadWorkspaceFile] works.
+  bool get supportsWorkspaceUpload =>
+      carrier is WorkspaceUploadCarrier && (carrier as WorkspaceUploadCarrier).supportsWorkspaceUpload;
+
+  /// Publishes a file into this session's workspace, without a receipt.
+  /// The returned relative path must be included in the prompt instead.
+  Future<WorkspaceUploadedFile> uploadWorkspaceFile(String sessionId, List<int> bytes, {required String name}) {
+    final transport = carrier is WorkspaceUploadCarrier ? carrier as WorkspaceUploadCarrier : null;
+    if (transport == null || !transport.supportsWorkspaceUpload) {
+      throw const DshRemoteException('WORKSPACE_UPLOAD_UNSUPPORTED', 'This Host does not support workspace uploads.');
+    }
+    return transport.uploadWorkspaceFile(sessionId, bytes, name: name);
+  }
+
   /// All `$events` items (session added/status/error, approvals, ...).
   Stream<HostEvent> get hostEvents => mux.hostEvents;
 
@@ -525,13 +546,54 @@ class DshClient {
     return FileReceipt(receiptId, FileAttachment.fromJson(value['file']));
   }
 
-  /// `session/attachment`: bytes of an image referenced by the session log.
-  Future<({ImageAttachment attachment, Uint8List bytes})> attachment(String sessionId, String attachmentId) async {
-    final value = asMapOrEmpty(
-      await rpc.call('session/attachment', {
-        'request': {'sessionId': sessionId, 'attachmentId': attachmentId},
-      }),
-    );
+  bool? _attachmentReferenceSupported;
+  MuxGeneration? _attachmentReferenceGeneration;
+
+  /// Read a durable image using its real log reference. Legacy Hosts reject the
+  /// new request before dispatch; only that explicit validation failure falls back.
+  Future<({ImageAttachment attachment, Uint8List bytes})> attachment(
+    String sessionId,
+    ImageAttachment reference,
+  ) async {
+    final generation = mux.generation;
+    if (generation == null || !identical(generation, _attachmentReferenceGeneration)) {
+      _attachmentReferenceSupported = null;
+      _attachmentReferenceGeneration = generation;
+    }
+    final knownSupport = _attachmentReferenceSupported;
+    void remember(bool supported) {
+      // HTTP-only/disconnected reads have no Host-generation identity. A late
+      // response from a retired connection must not seed the next generation.
+      if (generation != null &&
+          identical(mux.generation, generation) &&
+          identical(_attachmentReferenceGeneration, generation)) {
+        _attachmentReferenceSupported = supported;
+      }
+    }
+
+    Future<Object?> read(bool fullReference) => rpc.call('session/attachment', {
+      'request': {
+        'sessionId': sessionId,
+        if (fullReference) 'attachment': reference.toJson() else 'attachmentId': reference.attachmentId,
+      },
+    });
+    Object? response;
+    if (knownSupport == false) {
+      response = await read(false);
+    } else {
+      try {
+        response = await read(true);
+        remember(true);
+      } on DshRemoteException catch (error) {
+        if (knownSupport == true ||
+            !const {'gateway/arguments-invalid', 'gateway/input-invalid'}.contains(error.code)) {
+          rethrow;
+        }
+        response = await read(false);
+        remember(false);
+      }
+    }
+    final value = asMapOrEmpty(response);
     return (
       attachment: ImageAttachment.fromJson(value['attachment']),
       bytes: base64Decode(asString(value['data']) ?? ''),
@@ -683,10 +745,19 @@ class DshClient {
     return ModelCatalog.fromJson(await rpc.call('session/modelCatalog'));
   }
 
-  /// `session/selectModel`; the pair must be in the catalog
-  /// (`session/model-unavailable` otherwise). Also saved as the default for
-  /// new sessions in the background.
+  /// Switch this session's model, retaining the selection-only API.
   Future<ModelSelection> setModel(
+    String sessionId, {
+    required String provider,
+    required String model,
+    String? reasoningEffort,
+  }) async =>
+      (await setModelResult(sessionId, provider: provider, model: model, reasoningEffort: reasoningEffort)).selected;
+
+  /// `session/selectModel`; unavailable routes fail the request. A failure to
+  /// save the next-session default does not undo an accepted session selection.
+  /// Older hosts omit [ModelSelectionResult.defaultSave].
+  Future<ModelSelectionResult> setModelResult(
     String sessionId, {
     required String provider,
     required String model,
@@ -697,8 +768,12 @@ class DshClient {
         'request': {'sessionId': sessionId, 'provider': provider, 'model': model, 'reasoningEffort': ?reasoningEffort},
       }),
     );
-    return ModelSelection.fromJson(value['selected']) ??
-        ModelSelection(provider: provider, model: model, reasoningEffort: reasoningEffort);
+    return ModelSelectionResult(
+      selected:
+          ModelSelection.fromJson(value['selected']) ??
+          ModelSelection(provider: provider, model: model, reasoningEffort: reasoningEffort),
+      defaultSave: ModelDefaultSave.fromJson(value['defaultSave']),
+    );
   }
 
   /// `llm/listProviders`: registered provider routes.
@@ -773,9 +848,16 @@ class DshClient {
       executeCommand(sessionId, '/permission $preset');
 
   /// `commands/execute` (slash commands as typed in the composer).
+  /// Compaction waits for model generation; its request owns the cancellation
+  /// signal, so the ordinary HTTP deadline would cancel a healthy compaction.
   Future<CommandResult> executeCommand(String sessionId, String line) async {
+    final compact = RegExp(r'^/compact(?:\s|$)').hasMatch(line.trim());
     final value = asMap(
-      await rpc.call('commands/execute', {'agentId': sessionId, 'line': line, 'submittedAttachments': <Object?>[]}),
+      await rpc.call('commands/execute', {
+        'agentId': sessionId,
+        'line': line,
+        'submittedAttachments': <Object?>[],
+      }, compact ? const Duration(minutes: 30) : null),
     );
     final result = asMapOrEmpty(value?['result']);
     return CommandResult(asString(value?['commandId']), result['kind'] == 'success', asString(result['text']));
@@ -818,19 +900,25 @@ class DshClient {
   Stream<WorkspaceUpdate> watchWorkspaces() => _resilient('workspace/follow', const {}, WorkspaceUpdate.fromJson);
 
   /// `session/control`, reopened after reconnects (baseline first).
-  Stream<SessionControlUpdate> watchSessionControl() => _resilient('session/control', const {}, (value) {
-    final map = asMapOrEmpty(value);
-    if (map['type'] == 'baseline') {
-      final projections = asMapOrEmpty(asMap(map['value'])?['projections']);
-      return SessionControlBaseline(projections.map((id, v) => MapEntry(id, SessionProjections.fromJson(v))));
-    }
-    return SessionControlProjection(
-      asString(map['sessionId']) ?? '',
-      asString(map['key']) ?? '',
-      map['value'],
-      asInt(map['seq']) ?? -1,
-    );
-  });
+  Stream<SessionControlUpdate> watchSessionControl() =>
+      _resilient('session/control', const {}, (value) => value).expand((value) {
+        final map = asMapOrEmpty(value);
+        if (map['type'] == 'baseline') {
+          final projections = asMapOrEmpty(asMap(map['value'])?['projections']);
+          return [SessionControlBaseline(projections.map((id, v) => MapEntry(id, SessionProjections.fromJson(v))))];
+        }
+        final sessionId = asString(map['sessionId']) ?? '';
+        final seq = asInt(map['seq']) ?? -1;
+        // 0.2.2 batches all keys changed by one committed event. Preserve the
+        // existing per-key public stream and the shared commit sequence.
+        if (map['changes'] is List) {
+          return asListOrEmpty(map['changes']).map((change) {
+            final entry = asMapOrEmpty(change);
+            return SessionControlProjection(sessionId, asString(entry['key']) ?? '', entry['val'], seq);
+          });
+        }
+        return [SessionControlProjection(sessionId, asString(map['key']) ?? '', map['value'], seq)];
+      });
 
   Future<void> close() async {
     await mux.close();
@@ -860,9 +948,9 @@ class DshClient {
           break;
         }
         if (stopped) break;
-        final stream = mux.open(endpoint, args);
-        current = stream;
         try {
+          final stream = mux.open(endpoint, args);
+          current = stream;
           await for (final item in stream.items) {
             if (stopped) break;
             controller.add(parse(item));
@@ -1044,6 +1132,9 @@ class _SessionWatch {
   /// Waits for the next ready generation (a new login); false once the client
   /// closes or the watch stops.
   Future<bool> _nextGeneration() async {
+    // History may reject after a successor's non-replay ready event was sent.
+    final current = client.mux.generation;
+    if (current != null && !identical(current, _epochGeneration)) return !_stopped;
     final wake = _wake = Completer<bool>();
     void done(bool ready) {
       if (!wake.isCompleted) wake.complete(ready);
@@ -1091,9 +1182,10 @@ class _SessionWatch {
         break;
       }
       if (_stopped) break;
-      final stream = client.mux.open('session/follow', {'request': _followRequest()});
-      _current = stream;
+      MuxStream? stream;
       try {
+        stream = client.mux.open('session/follow', {'request': _followRequest()});
+        _current = stream;
         var opened = false;
         await for (final item in stream.items) {
           if (_stopped) break;
@@ -1103,12 +1195,14 @@ class _SessionWatch {
             await _onSnapshot(first);
             opened = true;
             if (options.activate) {
-              unawaited(client.activateSessionForInteraction(
-                sessionId,
-                epoch: epoch,
-                allowed: () => !_stopped && (options.activationAllowed?.call() ?? true),
-                onActivationChecked: options.onActivationChecked,
-              ));
+              unawaited(
+                client.activateSessionForInteraction(
+                  sessionId,
+                  epoch: epoch,
+                  allowed: () => !_stopped && (options.activationAllowed?.call() ?? true),
+                  onActivationChecked: options.onActivationChecked,
+                ),
+              );
             }
           } else {
             await _onFrame(item);
@@ -1127,10 +1221,12 @@ class _SessionWatch {
         epoch.retire();
         break;
       } on _Resync catch (error) {
+        if (!epoch.isCurrent || !identical(epoch.generation, client.mux.generation)) continue;
         epoch.retire();
         _emit(SessionSyncEvent(epoch));
-        await stream.cancel();
+        await stream?.cancel();
         if (_stopped) break;
+        if (!identical(epoch.generation, client.mux.generation)) continue;
         // Back-to-back resyncs back off; six without a clean frame end the watch.
         if (++_resyncs >= 6) {
           _controller.addError(DshProtocolException(error.reason));
@@ -1138,13 +1234,23 @@ class _SessionWatch {
         }
         if (_resyncs > 1 && !await _backoff(_resyncs - 2)) break;
       } on Object catch (error) {
+        // Preserve a closed client's terminal failure without recovery.
+        if (client.mux.state == DshConnectionState.closed) {
+          epoch.retire();
+          if (!_stopped) _controller.addError(error);
+          break;
+        }
+        if (!epoch.isCurrent || !identical(epoch.generation, client.mux.generation)) continue;
         epoch.retire();
         _emit(SessionSyncEvent(epoch));
-        await stream.cancel();
+        await stream?.cancel();
         if (_stopped) break;
+        if (!identical(epoch.generation, client.mux.generation)) continue;
         // A subagent child opened without its parent route: route it, retry.
         if (await client.adoptSubagentRoute(sessionId, error)) continue;
+        if (!identical(epoch.generation, client.mux.generation)) continue;
         if (await _recover(error)) continue;
+        if (!identical(epoch.generation, client.mux.generation)) continue;
         if (!_stopped) _controller.addError(error);
         break;
       }
@@ -1164,6 +1270,7 @@ class _SessionWatch {
       final firstSeq = events.isEmpty ? snapshot.cursor + 1 : events.first.seq;
       if (firstSeq > _lastSeq + 1) {
         final filled = await _fill(from: _lastSeq + 1, before: firstSeq, through: snapshot.cursor);
+        _checkHistoryOwner(epoch);
         if (options.includeSyncEvents) {
           var expected = _lastSeq + 1;
           for (final event in filled) {
@@ -1191,7 +1298,9 @@ class _SessionWatch {
           // Revalidate the complete inbox/running baseline, not only the
           // missing log records. The next snapshot repairs durable history.
           if (options.includeSyncEvents) throw _Resync('resync after gap before seq ${event.seq}');
+          final epoch = _epoch!;
           final filled = await _fill(from: _lastSeq + 1, before: event.seq, through: event.seq - 1);
+          _checkHistoryOwner(epoch);
           if (filled.isEmpty || filled.first.seq != _lastSeq + 1 || filled.last.seq != event.seq - 1) {
             throw _Resync('unrepairable gap before seq ${event.seq}');
           }
@@ -1213,17 +1322,37 @@ class _SessionWatch {
     }
   }
 
+  void _checkHistoryOwner(SessionFollowEpoch epoch) {
+    if (_stopped || client.mux.state == DshConnectionState.closed) throw const DshClosedException();
+    if (!epoch.isCurrent || !identical(epoch.generation, client.mux.generation)) {
+      throw const DshCarrierLostException('history repair belongs to a retired follow');
+    }
+  }
+
   Future<List<SessionLogEvent>> _fill({required int from, required int before, required int through}) async {
+    final epoch = _epoch!;
     final out = <SessionLogEvent>[];
     var beforeSeq = before;
-    while (beforeSeq > from && !_stopped) {
-      final page = await client.history(sessionId, throughSeq: through, beforeSeq: beforeSeq, maxMessages: 500);
+    while (beforeSeq > from) {
+      _checkHistoryOwner(epoch);
+      final HistoryPage page;
+      try {
+        page = await client.history(sessionId, throughSeq: through, beforeSeq: beforeSeq, maxMessages: 500);
+      } catch (_) {
+        // Closing the client keeps the original terminal error contract;
+        // only a live successor must be protected from stale recovery.
+        if (!_stopped && client.mux.state == DshConnectionState.closed) rethrow;
+        _checkHistoryOwner(epoch);
+        rethrow;
+      }
+      _checkHistoryOwner(epoch);
       final usable = page.events.where((e) => e.seq >= from && e.seq < beforeSeq).toList();
       if (usable.isEmpty) break;
-      out.insertAll(0, usable);
+      // Reverse each page now, then the whole result, without shifting the accumulated prefix.
+      out.addAll(usable.reversed);
       beforeSeq = usable.first.seq;
       if (!page.hasMore) break;
     }
-    return out;
+    return out.reversed.toList();
   }
 }

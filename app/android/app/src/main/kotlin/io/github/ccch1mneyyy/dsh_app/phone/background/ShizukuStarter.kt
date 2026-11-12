@@ -16,7 +16,11 @@ import java.util.concurrent.TimeUnit
 import rikka.shizuku.Shizuku
 import rikka.sui.Sui
 
-class ShizukuStarter(private val context: Context, private val onChanged: () -> Unit) {
+class ShizukuStarter(
+    private val context: Context,
+    private val onAccessChanged: () -> Unit,
+    private val onChanged: () -> Unit,
+) {
     companion object {
         const val PACKAGE = "moe.shizuku.privileged.api"
         private const val PERMISSION_REQUEST_CODE = 4601
@@ -41,9 +45,12 @@ class ShizukuStarter(private val context: Context, private val onChanged: () -> 
     private var binding: Binding? = null
     @Volatile private var listenersAdded = false
 
+    // Shizuku only replaces a running user service when this number changes; bump it
+    // together with any PrivilegedDisplayService protocol change, or an upgraded app
+    // keeps talking to the old service process.
     private val args0: Shizuku.UserServiceArgs
         get() = Shizuku.UserServiceArgs(ComponentName(context, PrivilegedDisplayService::class.java))
-            .tag("dsh.vdisplay").processNameSuffix("vdisplay").version(1).daemon(false)
+            .tag("dsh.vdisplay").processNameSuffix("vdisplay").version(3).daemon(false)
 
     private fun appInstalled(): Boolean =
         runCatching { context.packageManager.getApplicationInfo(PACKAGE, 0); true }.getOrDefault(false)
@@ -77,9 +84,12 @@ class ShizukuStarter(private val context: Context, private val onChanged: () -> 
         if (listenersAdded) return
         listenersAdded = true
         runCatching {
-            Shizuku.addBinderReceivedListenerSticky { onChanged() }
-            Shizuku.addBinderDeadListener { disconnect(); onChanged() }
-            Shizuku.addRequestPermissionResultListener { _, _ -> onChanged() }
+            // An already-present binder is only an initial status refresh, not a
+            // new access generation that could retire the first pending probe.
+            Shizuku.addBinderReceivedListener { onAccessChanged(); onChanged() }
+            Shizuku.addBinderDeadListener { disconnect(); onAccessChanged(); onChanged() }
+            Shizuku.addRequestPermissionResultListener { _, _ -> onAccessChanged(); onChanged() }
+            onChanged()
         }
     }
 
@@ -107,6 +117,11 @@ class ShizukuStarter(private val context: Context, private val onChanged: () -> 
             Shizuku.removeRequestPermissionResultListener(listener)
             false
         }
+    }
+
+    /** Short ownership read; never reconnects, probes, or waits for transport work. */
+    internal fun isPublished(expected: PrivilegedChannel): Boolean = synchronized(guard) {
+        channel === expected && binding?.let { it.valid && !it.cleaning && it.worker == null } == true
     }
 
     /** The 15 s bind wait does not impose a deadline on Binder PROBE or remote teardown. */
@@ -153,9 +168,12 @@ class ShizukuStarter(private val context: Context, private val onChanged: () -> 
             val remote = IPrivilegedDisplay.Stub.asInterface(binder) ?: return null
             val probe = remote.execute(android.os.Bundle().apply { putString(Proto.OP, Proto.OP_PROBE) })
             if (!probe.getBoolean(Proto.OK) || probe.getString("revision") != Proto.REVISION) return null
+            val peer = MuxProtocol.peer(probe)
+            peer?.let { MuxProtocol.acknowledge(remote.execute(MuxProtocol.optIn(it)), it) }
+            val candidate = ShizukuChannel(remote, peer, backgroundRequestLimit(probe::get, probe::containsKey, peer != null))
             return synchronized(guard) {
-                if (!owner.valid || !owner.mayStart()) return null
-                ShizukuChannel(remote).also { channel = it }
+                if (!owner.valid || !owner.mayStart()) { candidate.close(); return null }
+                candidate.also { channel = it }
             }
         } catch (e: Exception) {
             if (e is InterruptedException) Thread.currentThread().interrupt()
@@ -192,6 +210,7 @@ class ShizukuStarter(private val context: Context, private val onChanged: () -> 
     // Caller holds guard. A pending Binder operation must finish before its tag may be reused.
     private fun retire(owner: Binding) {
         owner.valid = false
+        channel?.close() // Memory-only admission retirement; physical unbind remains below.
         channel = null
         owner.latch.countDown()
         owner.worker?.interrupt()

@@ -62,7 +62,10 @@ void main() {
         ),
         RemoteTransportMode.lan,
       );
-      expect(selectedPeerPath(pairStats('host', '192.168.1.20', 'host', '192.168.1.30').take(3).toList()), isNotNull);
+      final withoutTransport = pairStats('host', '192.168.1.20', 'host', '192.168.1.30').take(3).toList();
+      expect(selectedPeerPath(withoutTransport), isNull, reason: 'nomination alone does not confirm a successful pair');
+      withoutTransport[2]['state'] = 'succeeded';
+      expect(selectedPeerPath(withoutTransport), RemoteTransportMode.lan);
       expect(selectedPeerPath(const []), isNull);
     });
 
@@ -206,8 +209,11 @@ void main() {
       ];
       expect(requests, [
         ['lan', 'p2p', 'turn', 'relay'],
+        ['lan', 'p2p', 'turn', 'relay'],
         ['relay'],
       ]);
+      expect(server.turnRequests, hasLength(2));
+      expect(server.turnRequests.toSet(), hasLength(2), reason: 'TURN credentials are connection-scoped');
       expect(host.rtcOffers, hasLength(1));
       final relayConnection = server.links.values.single.id;
       expect(host.rtcOffers.single, isNot(relayConnection));
@@ -254,6 +260,44 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 20));
       expect(types(), isNot(contains('signal.offer')));
       expect(host.handshakes, hasLength(1));
+    });
+
+    test('native failure followed by negotiation abort releases the peer only once', () async {
+      final gate = Completer<void>();
+      network.offerGate = gate.future;
+      late RemotePeerHandlers handlers;
+      _ClosingPeer? peer;
+      account.peerConnector = (servers, callbacks) async {
+        handlers = callbacks;
+        return peer = _ClosingPeer(await network.connector(servers, callbacks));
+      };
+      final connecting = connect();
+      await _eventually(() => peer?.offering ?? false);
+      handlers.onOpen();
+      handlers.onClosed('ICE failed immediately after opening');
+      gate.complete();
+      final client = await connecting;
+
+      expect(client.remoteCarrier!.state!.transport, 'relay');
+      expect(await client.listSessions(), isEmpty);
+      expect(peer!.closes, 1, reason: 'the native failure and abort share ownership of one peer');
+      expect(types(), isNot(contains('signal.offer')));
+    });
+
+    test('a synchronous peer close failure cannot skip Control cleanup or Relay fallback', () async {
+      network.outcome = FakeRtcOutcome.fail;
+      late _ClosingPeer peer;
+      account.peerConnector = (servers, callbacks) async =>
+          peer = _ClosingPeer(await network.connector(servers, callbacks), throwOnClose: true);
+
+      final client = await connect();
+
+      expect(client.remoteCarrier!.state!.transport, 'relay');
+      expect(await client.listSessions(), isEmpty);
+      expect(peer.closes, 1);
+      await _eventually(() => server.links.length == 1);
+      expect(host.handshakes, hasLength(1));
+      expect(fallbacks, ['directFailed']);
     });
 
     test('stalled stats are bounded and do not discard a working DataChannel', () async {
@@ -378,6 +422,79 @@ void main() {
       );
     });
 
+    for (final firstFetchTimesOut in [false, true]) {
+      test(
+        'fresh TURN credentials succeed after direct credentials ${firstFetchTimesOut ? 'time out' : 'are empty'}',
+        () async {
+          await account.close();
+          account = RemoteAccount(
+            secrets: MemorySecretStore(),
+            serverUrl: server.url,
+            peerConnector: network.connector,
+            onDirectFallback: fallbacks.add,
+            directTimeout: const Duration(milliseconds: 300),
+            iceServersTimeout: const Duration(milliseconds: 50),
+          );
+          final firstResponse = Completer<List<Map<String, Object?>>>();
+          addTearDown(() {
+            if (!firstResponse.isCompleted) firstResponse.complete([]);
+          });
+          server.iceServersForRequest = (_) async {
+            if (server.turnRequests.length == 1) {
+              return firstFetchTimesOut ? firstResponse.future : [];
+            }
+            return [
+              {
+                'urls': ['turn:turn.example:3478'],
+                'username': 'fresh-user',
+                'credential': 'fresh-credential',
+              },
+            ];
+          };
+          network.policyOutcomes[RemoteIceTransportPolicy.all] = FakeRtcOutcome.fail;
+          final client = await connect();
+          expect(await client.listSessions(), isEmpty);
+          expect(server.turnRequests, hasLength(2));
+          expect(server.turnRequests.toSet(), hasLength(2), reason: 'TURN uses a fresh connection-scoped request');
+          expect(host.rtcOffers, server.turnRequests);
+          expect(network.policies, [RemoteIceTransportPolicy.all, RemoteIceTransportPolicy.relay]);
+          expect(network.iceServers.first, isEmpty);
+          final turnServer = network.iceServers.last.single;
+          expect(turnServer.urls, ['turn:turn.example:3478']);
+          expect(turnServer.username, 'fresh-user');
+          expect(turnServer.credential, 'fresh-credential');
+          expect(network.clients.first.closed, isTrue);
+          expect(client.remoteCarrier!.state!.transport, 'turn');
+          expect(host.handshakes, [server.turnRequests.last]);
+          expect(server.controlRelayFrames, 0);
+          expect(fallbacks, ['directFailed']);
+          if (firstFetchTimesOut) {
+            expect(firstResponse.isCompleted, isFalse, reason: 'fresh TURN does not await the timed-out request');
+            firstResponse.complete([]);
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            expect(client.remoteCarrier!.state!.transport, 'turn');
+          }
+        },
+      );
+    }
+
+    test('default credential timeout accepts a response taking six seconds', () async {
+      server.iceServersForRequest = (_) async {
+        await Future<void>.delayed(const Duration(seconds: 6));
+        return [
+          {
+            'urls': ['stun:stun.example:3478'],
+          },
+        ];
+      };
+      final client = await connect();
+      expect(await client.listSessions(), isEmpty);
+      expect(server.turnRequests, hasLength(1));
+      expect(network.iceServers.single.single.urls, ['stun:stun.example:3478']);
+      expect(client.remoteCarrier!.state!.transport, 'lan');
+      expect(fallbacks, isEmpty);
+    });
+
     test('failed direct and TURN attempts reach Relay with exactly one Noise handshake', () async {
       server.iceServers = [
         {
@@ -428,12 +545,19 @@ void main() {
       expect(initial.transportMode, RemoteTransportMode.lan);
       expect(initial.connectionDuration!.inMicroseconds, greaterThan(0));
       expect(initial.roundTripTime, const Duration(milliseconds: 23));
+      expect(initial.peerNetwork?.localIpVersion, RemoteIpVersion.ipv4);
+      expect(initial.peerNetwork?.remoteIpVersion, RemoteIpVersion.ipv4);
       final framesBefore = server.clientControlFrames.length;
-      network.stats = pairStats('host', '192.168.1.20', 'relay', '198.51.100.9');
+      network.stats = pairStats('host', '2001:db8::1', 'relay', '2001:db8::2');
+      network.stats[0]['protocol'] = 'udp';
+      network.stats[1]['protocol'] = 'udp';
       network.stats[2]['currentRoundTripTime'] = 0.087;
       final observed = await session.inspectNetwork!();
       expect(observed.transportMode, RemoteTransportMode.turn);
       expect(observed.roundTripTime, const Duration(milliseconds: 87));
+      expect(observed.peerNetwork?.localIpVersion, RemoteIpVersion.ipv6);
+      expect(observed.peerNetwork?.remoteIpVersion, RemoteIpVersion.ipv6);
+      expect(observed.peerNetwork?.protocol, RemoteIceProtocol.udp);
       expect(observed.connectionDuration, initial.connectionDuration);
       expect(observed.observedAt.isBefore(initial.observedAt), isFalse);
       expect(session.transport, 'lan', reason: 'wire selection is separate from the currently observed pair');
@@ -442,6 +566,7 @@ void main() {
       final unknown = await session.inspectNetwork!();
       expect(unknown.transportMode, isNull);
       expect(unknown.roundTripTime, isNull);
+      expect(unknown.peerNetwork, isNull);
       expect(unknown.fallbackReason, RemoteNetworkFallbackReason.pathUnverified);
       network.stats = pairStats('host', '192.168.1.20', 'relay', '198.51.100.9');
       await session.inspectNetwork!();
@@ -552,6 +677,40 @@ void main() {
       expect(trace, isNot(contains('192.168.1.')));
     });
   });
+}
+
+class _ClosingPeer implements RemotePeerConnection {
+  _ClosingPeer(this.delegate, {this.throwOnClose = false});
+
+  final RemotePeerConnection delegate;
+  final bool throwOnClose;
+  int closes = 0;
+  bool offering = false;
+
+  @override
+  Future<String> createOffer(String channelLabel) {
+    offering = true;
+    return delegate.createOffer(channelLabel);
+  }
+
+  @override
+  Future<void> setAnswer(String sdp) => delegate.setAnswer(sdp);
+
+  @override
+  Future<void> addIceCandidate(Map<String, Object?> candidate) => delegate.addIceCandidate(candidate);
+
+  @override
+  Future<void> send(Uint8List data) => delegate.send(data);
+
+  @override
+  Future<List<Map<String, Object?>>> stats() => delegate.stats();
+
+  @override
+  Future<void> close() {
+    closes++;
+    if (throwOnClose) throw StateError('native close failed synchronously');
+    return delegate.close();
+  }
 }
 
 Future<void> _eventually(bool Function() condition, {Duration timeout = const Duration(seconds: 5)}) async {

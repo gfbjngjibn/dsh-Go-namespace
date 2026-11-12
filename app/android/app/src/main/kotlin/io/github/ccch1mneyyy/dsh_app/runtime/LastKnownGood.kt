@@ -3,6 +3,7 @@ package io.github.ccch1mneyyy.dsh_app.runtime
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.nio.file.Files
 
 /** Enabled bundles, installed packages and settings layer of the main profile at one moment. */
 data class ProfileSnapshot(
@@ -191,7 +192,7 @@ object LastKnownGood {
                 val patchFile = File(dir, "cordis.patch.yml")
                 if (patchFile.isFile) patchFile.copyTo(File(dir, "cordis.patch.yml.bak-$stamp"), overwrite = true)
                 val text = lkg.patch
-                if (text != null) SafeMode.writeAtomic(patchFile, text) else patchFile.delete()
+                if (text != null) SafeMode.writeAtomic(patchFile, text) else Files.deleteIfExists(patchFile.toPath())
             }
             plan
         }
@@ -206,7 +207,6 @@ object LastKnownGood {
         val deadline = System.currentTimeMillis() + 3000
         while (true) {
             if (lock.createNewFile()) {
-                lock.writeText("${android.os.Process.myPid()}\n")
                 break
             }
             val holder = try {
@@ -215,13 +215,13 @@ object LastKnownGood {
                 null
             }
             if (holder != null && !File("/proc/$holder").exists()) {
-                lock.delete()
-                continue
+                if (lock.delete()) continue
             }
             if (System.currentTimeMillis() > deadline) throw IllegalStateException(busyConfig)
             Thread.sleep(50)
         }
         try {
+            lock.writeText("${android.os.Process.myPid()}\n")
             return block()
         } finally {
             lock.delete()

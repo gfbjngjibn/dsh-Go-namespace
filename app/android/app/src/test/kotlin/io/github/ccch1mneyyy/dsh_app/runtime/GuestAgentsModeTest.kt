@@ -1,10 +1,28 @@
 package io.github.ccch1mneyyy.dsh_app.runtime
 
 import java.io.File
+import java.nio.file.Files
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class GuestAgentsModeTest {
+    @Test fun aManagedInstructionsLinkIsKeptWhileItsTargetIsUpdated() {
+        assumeTrue("Linux symlink regression", System.getProperty("os.name").startsWith("Linux"))
+        val root = kotlin.io.path.createTempDirectory("agents-link").toFile()
+        try {
+            val file = File(root, "root/.dsh/AGENTS.md")
+            val target = File(root, "managed-instructions.md")
+            GuestSetup.writeAgentsMd(root, phoneStorage = false)
+            Files.move(file.toPath(), target.toPath())
+            Files.createSymbolicLink(file.toPath(), target.toPath())
+            GuestSetup.writeAgentsMd(root, phoneStorage = false, directEngine = true)
+            assertTrue(Files.isSymbolicLink(file.toPath()))
+            assertTrue(target.readText().contains("`${root.canonicalPath}/root/workspace`"))
+            assertEquals(target.readText(), file.readText())
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun compatibleLaunchRestoresTheExactOriginalDefaultInstructionsAfterDirect() {
         val root = kotlin.io.path.createTempDirectory("agents-mode").toFile()
         try {
@@ -94,6 +112,39 @@ class GuestAgentsModeTest {
             GuestSetup.writeDiagnostics(root, "# second\n")
             assertEquals("# second\n", file.readText())
             assertEquals(0, file.parentFile!!.listFiles()!!.count { it.name.startsWith(".diagnostics") })
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun safeDiagnosticsLeaveOriginalHomeUntouchedAndNormalDiagnosticsReturnToIt() {
+        val root = kotlin.io.path.createTempDirectory("diagnostics-safe").toFile()
+        try {
+            val original = GuestSetup.writeDiagnostics(root, "# original\n")
+            val originalBytes = original.readBytes()
+            val safeFile = GuestSetup.writeDiagnostics(root, "# rescue\n", safe = true)
+            assertEquals(
+                File(root, "var/lib/dsh-app/safe-mode/home/dsh-app/diagnostics.md").absoluteFile,
+                safeFile.absoluteFile,
+            )
+            assertEquals("# rescue\n", safeFile.readText())
+            assertArrayEquals(originalBytes, original.readBytes())
+            val normalFile = GuestSetup.writeDiagnostics(root, "# normal again\n")
+            assertEquals(original.absoluteFile, normalFile.absoluteFile)
+            assertEquals("# normal again\n", original.readText())
+            assertEquals("# rescue\n", safeFile.readText())
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun safeDiagnosticsDoNotNeedTheOriginalHomeToBeADirectory() {
+        val root = kotlin.io.path.createTempDirectory("diagnostics-broken-home").toFile()
+        try {
+            val originalHome = File(root, "root/.dsh")
+            originalHome.parentFile.mkdirs()
+            val originalBytes = "original path is not a directory\n".toByteArray()
+            originalHome.writeBytes(originalBytes)
+            val safeFile = GuestSetup.writeDiagnostics(root, "# rescue\n", safe = true)
+            assertEquals("# rescue\n", safeFile.readText())
+            assertArrayEquals(originalBytes, originalHome.readBytes())
+            assertEquals(0, safeFile.parentFile!!.listFiles()!!.count { it.name.startsWith(".diagnostics") })
         } finally { root.deleteRecursively() }
     }
 

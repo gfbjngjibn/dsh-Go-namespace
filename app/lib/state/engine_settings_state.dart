@@ -388,9 +388,10 @@ class EngineSettingsFailure implements Exception {
   String toString() => message;
 }
 
-String _bound(String raw) {
+/// A schema bound in plain digits, or null when the Host text there is not a number.
+String? _bound(String raw) {
   final n = num.tryParse(raw);
-  if (n == null) return raw;
+  if (n == null || !n.isFinite) return null;
   return n == n.roundToDouble() ? n.round().toString() : n.toString();
 }
 
@@ -405,15 +406,17 @@ String describeSettingsError(Object error) {
       case 'credential/rejected':
         return appL10n.stateCredentialFromEnvironment;
     }
+    if (engineErrorReason(error) case final reason?) return reason;
     if (message.contains('overridden by a home patch')) return appL10n.stateSettingsFromFile;
     if (RegExp(r'expected number >= (\S+)').firstMatch(message) case final m?) {
-      return appL10n.stateSettingsMinimum(_bound(m[1]!));
+      if (_bound(m[1]!) case final bound?) return appL10n.stateSettingsMinimum(bound);
     }
     if (RegExp(r'expected number <= (\S+)').firstMatch(message) case final m?) {
-      return appL10n.stateSettingsMaximum(_bound(m[1]!));
+      if (_bound(m[1]!) case final bound?) return appL10n.stateSettingsMaximum(bound);
     }
     if (RegExp(r'multiple of (\S+)').firstMatch(message) case final m?) {
-      return m[1] == '1' ? appL10n.stateSettingsInteger : appL10n.stateSettingsMultiple(_bound(m[1]!));
+      if (m[1] == '1') return appL10n.stateSettingsInteger;
+      if (_bound(m[1]!) case final bound?) return appL10n.stateSettingsMultiple(bound);
     }
     if (message.contains('to match regexp')) return appL10n.stateSettingsInvalidFormat;
     if (RegExp(r'string length >= (\d+)').firstMatch(message) case final m?) {
@@ -427,7 +430,6 @@ String describeSettingsError(Object error) {
       return appL10n.statePluginDisabled;
     }
     if (message.contains('not volatile')) return appL10n.stateSettingsRestartRequired;
-    if (error.code.startsWith('gateway/') && error.code != 'gateway/internal') return appL10n.stateEngineUnsupported;
     if (message.contains('expected')) return appL10n.stateSettingsInvalidValue;
     return appL10n.stateSettingsRejected;
   }
@@ -535,18 +537,25 @@ String get _staleEditorMessage => appL10n.engineSettingsHostChanged;
 /// engine says a namespace or a credential changed.
 class EngineSettingsController extends AsyncNotifier<EngineSettings?> {
   DshClient? _client;
+  MuxGeneration? _generation;
   Object _origin = Object();
   final Map<String, _CredentialRead> _credentialReads = {};
   final Map<String, CredentialStatus> _credentialCache = {};
 
   SettingsEditSession edit(EngineSettings snapshot) => SettingsEditSession._(this, snapshot);
 
-  bool _accepts(Object? origin) =>
-      ref.mounted &&
-      origin != null &&
-      identical(origin, _origin) &&
-      _client != null &&
-      identical(ref.read(activeConnectionProvider).value?.client, _client);
+  bool _accepts(Object? origin) {
+    if (!ref.mounted || origin == null || !identical(origin, _origin) || _client == null) return false;
+    final connection = ref.read(activeConnectionProvider);
+    final mux = _client!.mux;
+    return !connection.isLoading &&
+        !connection.hasError &&
+        identical(connection.value?.client, _client) &&
+        identical(mux.generation, _generation) &&
+        mux.state != DshConnectionState.reconnecting &&
+        mux.state != DshConnectionState.unauthorized &&
+        mux.state != DshConnectionState.closed;
+  }
 
   /// What the Host last confirmed, per namespace (edits not applied).
   Map<String, SettingsNamespaceView> _confirmed = const {};
@@ -561,9 +570,11 @@ class EngineSettingsController extends AsyncNotifier<EngineSettings?> {
 
   @override
   Future<EngineSettings?> build() async {
-    final conn = ref.watch(activeConnectionProvider.select((c) => c.value));
+    final connection = ref.watch(activeConnectionProvider);
+    final conn = connection.isLoading || connection.hasError ? null : connection.value;
     final origin = _origin = Object();
     _client = conn?.client;
+    _generation = conn?.client.mux.generation;
     _confirmed = const {};
     _credentialReads.clear();
     _credentialCache.clear();
@@ -575,6 +586,11 @@ class EngineSettingsController extends AsyncNotifier<EngineSettings?> {
     if (conn == null) return null;
     final client = conn.client;
     final sub = client.hostEvents.listen((event) {
+      if (!ref.mounted || !identical(origin, _origin)) return;
+      if (event is HostReadyEvent && !identical(client.mux.generation, _generation)) {
+        ref.invalidateSelf();
+        return;
+      }
       if (!_accepts(origin)) return;
       switch (event) {
         case SettingsUpdatedEvent() || HostReadyEvent():

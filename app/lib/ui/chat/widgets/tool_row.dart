@@ -1,24 +1,27 @@
 // Portions derived from PiPilot (https://github.com/CikeSeven/pi_pilot), MIT, Copyright (c) 2026 CikeSeven. See THIRD_PARTY_NOTICES.md.
 
+import 'dart:async';
+
 import 'package:dsh_client/dsh_client.dart';
 import 'package:flutter/material.dart';
 
 import '../../../l10n/l10n.dart';
 import '../../common/expand_reveal.dart';
-import '../../common/overscroll_forwarder.dart';
+import '../../common/fluid_bits.dart';
 import '../../common/smooth_size.dart';
 import '../../common/tool_glyph.dart';
 import '../../plugins/view/plugin_view.dart' show DshUiParsed, PluginToolCard;
 import '../../theme/app_icons.dart';
 import '../../theme/theme.dart';
-import '../render/ansi_text.dart';
 import '../render/code_block.dart';
 import '../render/diff_view.dart';
+import '../render/long_text.dart';
 import '../media/media_card.dart';
 import '../tool_view.dart';
 import '../turn_summary.dart';
 import 'approval_card.dart';
 import 'change_card.dart' show DiffCounts;
+import 'question_reply_card.dart';
 import 'stream_motion.dart';
 import 'stream_row.dart';
 import 'tool_images.dart';
@@ -104,6 +107,7 @@ class _ToolRowState extends State<ToolRow> {
     final v = view;
     // 一轮折叠后:只露卡片本身,工具行收在过程里。
     if (widget.card == ToolCardPlacement.cardOnly) {
+      if (v.questionReplies.isNotEmpty) return QuestionReplyCard(replies: v.questionReplies);
       if (v.media case final media?) {
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
@@ -157,6 +161,8 @@ class _ToolRowState extends State<ToolRow> {
             },
           ),
         ),
+        if (widget.card == ToolCardPlacement.inline && v.questionReplies.isNotEmpty)
+          QuestionReplyCard(replies: v.questionReplies),
         if (pending != null)
           Padding(
             padding: const EdgeInsets.only(top: 4, bottom: 4),
@@ -239,16 +245,18 @@ class _ToolHeader extends StatelessWidget {
             SmoothSize(
               duration: AppMotion.of(context, AppMotion.quick),
               alignment: Alignment.centerRight,
-              child: AnimatedSwitcher(
-                duration: AppMotion.of(context, AppMotion.quick),
-                layoutBuilder: (current, previous) =>
-                    Stack(alignment: Alignment.centerRight, children: [...previous, ?current]),
-                child: _StatusTrail(
-                  key: ValueKey(_trailKind(view, autoAllowing)),
-                  view: view,
-                  autoAllowing: autoAllowing,
-                ),
-              ),
+              child: AppMotion.fluid(context)
+                  ? _FluidTrail(view: view, autoAllowing: autoAllowing)
+                  : AnimatedSwitcher(
+                      duration: AppMotion.of(context, AppMotion.quick),
+                      layoutBuilder: (current, previous) =>
+                          Stack(alignment: Alignment.centerRight, children: [...previous, ?current]),
+                      child: _StatusTrail(
+                        key: ValueKey(_trailKind(view, autoAllowing)),
+                        view: view,
+                        autoAllowing: autoAllowing,
+                      ),
+                    ),
             ),
             if (opens) ...[const SizedBox(width: 4), Icon(AppIcons.disclosure, size: 16, color: dsh.textTertiary)],
           ],
@@ -272,6 +280,67 @@ class _LockGlyph extends StatelessWidget {
         decoration: ShapeDecoration(color: bg, shape: Squircle.border(size * 0.32)),
         child: Icon(AppIcons.lock, size: size * 0.6, color: fg),
       ),
+    );
+  }
+}
+
+/// The fluid tier's trail. Running is a thin slow arc in the row's own quiet colour; a
+/// tool that just succeeded draws a check for a moment and then goes quiet, as a
+/// finished row is. Only one seen finishing: a row built finished stays empty.
+class _FluidTrail extends StatefulWidget {
+  const _FluidTrail({required this.view, required this.autoAllowing});
+
+  final ToolView view;
+  final bool autoAllowing;
+
+  @override
+  State<_FluidTrail> createState() => _FluidTrailState();
+}
+
+class _FluidTrailState extends State<_FluidTrail> {
+  static const _checkFor = Duration(milliseconds: 900);
+
+  Timer? _hold;
+  bool _justDone = false;
+
+  @override
+  void didUpdateWidget(_FluidTrail old) {
+    super.didUpdateWidget(old);
+    final before = _trailKind(old.view, old.autoAllowing);
+    final now = _trailKind(widget.view, widget.autoAllowing);
+    if (before == 'spinner' && now == 'empty' && widget.view.item.status == ToolStatus.succeeded) {
+      _justDone = true;
+      _hold?.cancel();
+      _hold = Timer(_checkFor, () {
+        if (mounted) setState(() => _justDone = false);
+      });
+    } else if (now != 'empty') {
+      _hold?.cancel();
+      _justDone = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _hold?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dsh = DshColors.of(context);
+    final kind = _trailKind(widget.view, widget.autoAllowing);
+    final Widget child = switch (kind) {
+      'spinner' => QuietArc(key: const ValueKey('spinner'), color: dsh.textTertiary),
+      'empty' when _justDone => DrawnCheck(key: const ValueKey('done'), size: 14, color: dsh.textTertiary),
+      _ => _StatusTrail(key: ValueKey(kind), view: widget.view, autoAllowing: widget.autoAllowing),
+    };
+    return AnimatedSwitcher(
+      duration: AppMotion.of(context, AppMotion.standard),
+      switchInCurve: AppMotion.std,
+      switchOutCurve: AppMotion.std,
+      layoutBuilder: (current, previous) => Stack(alignment: Alignment.centerRight, children: [...previous, ?current]),
+      child: child,
     );
   }
 }
@@ -359,32 +428,27 @@ class ToolDetail extends StatelessWidget {
       sections.add(body);
     }
 
-    Widget scrollWell(Widget child) => ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: _kDetailMaxHeight),
-      child: OverscrollForwarder(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-          child: SizedBox(width: double.infinity, child: child),
-        ),
-      ),
-    );
+    // 限高滚动的文本井;太长的只排头尾,井底给「查看全部」。
+    Widget textWell(String title, String text, {bool ansi = false, TextStyle? style, InlineSpan? prompt}) =>
+        LongTextWell(
+          title: title,
+          text: text,
+          style: style ?? monoStyle,
+          maxHeight: _kDetailMaxHeight,
+          ansi: ansi,
+          prompt: prompt,
+        );
 
     // —— 参数 ——
     if (view.command case final command?) {
       section(
         l10n.chatCommand,
-        scrollWell(
-          SelectableText.rich(
-            TextSpan(
-              children: [
-                TextSpan(
-                  text: r'$ ',
-                  style: monoStyle.copyWith(color: dsh.lineNumberFg),
-                ),
-                TextSpan(text: command),
-              ],
-            ),
-            style: monoStyle,
+        textWell(
+          l10n.chatCommand,
+          command,
+          prompt: TextSpan(
+            text: r'$ ',
+            style: monoStyle.copyWith(color: dsh.lineNumberFg),
           ),
         ),
       );
@@ -416,7 +480,7 @@ class ToolDetail extends StatelessWidget {
         ),
       );
     } else if (item.arguments.trim().isNotEmpty && item.arguments.trim() != '{}') {
-      section(l10n.chatParameters, scrollWell(SelectableText(view.prettyArguments, style: monoStyle)));
+      section(l10n.chatParameters, textWell(l10n.chatParameters, view.prettyArguments));
     }
 
     // —— 结果 ——
@@ -427,12 +491,7 @@ class ToolDetail extends StatelessWidget {
     } else if (view.failureText case final failure?) {
       section(
         l10n.chatError,
-        scrollWell(
-          AnsiText(
-            text: failure,
-            style: monoStyle.copyWith(color: dsh.danger),
-          ),
-        ),
+        textWell(l10n.chatError, failure, ansi: true, style: monoStyle.copyWith(color: dsh.danger)),
       );
     } else if (item.status == ToolStatus.succeeded) {
       if (view.diff case final lines? when lines.isNotEmpty) {
@@ -484,14 +543,11 @@ class ToolDetail extends StatelessWidget {
                       ),
                     )
               : images == null
-              ? scrollWell(AnsiText(text: text, style: monoStyle))
+              ? textWell(resultTitle, text, ansi: true)
               : Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   mainAxisSize: MainAxisSize.min,
-                  children: [
-                    scrollWell(AnsiText(text: text, style: monoStyle)),
-                    images,
-                  ],
+                  children: [textWell(resultTitle, text, ansi: true), images],
                 ),
         );
       }

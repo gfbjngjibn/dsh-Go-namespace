@@ -21,9 +21,25 @@ During a task, text on the screen is sent to the model you chose; with a vision 
 
 Open this row under **Setup**, read the explanation and tap **Authorize and enable**. A connected Shizuku, Sui, root or self-ADB channel can grant permission (the page says which one it will use). If neither is available, follow the setup page or copy the displayed command and run it once on your computer. Restoration requires both the in-app phone-control switch and the system permission.
 
+When authorizing through Shizuku (including Sui) or self-ADB, the app checks whether the permission was actually granted. It distinguishes an authorization request that could not be completed through the channel, an explicit system denial, and an acknowledged request that still left the permission ungranted. An explicit denial is not reported as an ADB disconnection. A temporary Shizuku or self-ADB authorization connection may close normally afterward; that alone does not mean the attempt failed. If the system denies permission, using the computer command is not guaranteed to succeed.
+
 After granting permission, turning off the accessibility service in Android settings will trigger an attempt to turn it back on. To stop phone control, turn off the switch inside DSH Go. Restoration changes only DSH Go's service entry and preserves other accessibility services.
 
 After a system force-stop, reopen DSH Go before it can recover. Repeated failures back off to about ten minutes between attempts. This permission does not keep the app alive indefinitely or fix the underlying cause of a service crash.
+
+## Android Shell (separate authorization)
+
+<!-- nav: commonSettings,hubSettingsPhoneControl,androidShellTitle -->
+`Settings › Phone control › Android Shell`. Off by default: enable Phone control, then separately accept the Shell risk notice. Commands run in Android `sh` on this phone, not Ubuntu bash. Accessibility, the background display, and Android 14 are not required.
+
+- Shizuku: install and start Shizuku yourself, explicitly request authorization here, then connect. The actual service identity may be shell (UID 2000) or root (UID 0); check the status and each command confirmation.
+- **Self-ADB**: enable Wireless debugging in Android Developer options, open its pairing-code dialog, and enter the six-digit code and pairing port here (or use discovery). Connect after pairing. The connection port differs from the pairing port; leave it blank to discover a local endpoint. Pairing codes are not saved or logged. This feature does not contact other devices.
+
+Every `android_shell` tool call requires native confirmation of the complete command and actual identity. Screen-control task/always confirmation exemptions do not apply. System authorization, background-display authorization, and accessibility-restoration authorization do not authorize arbitrary commands. App rules cannot constrain every Shell operation. Do not rewrite a refused command or switch channels to bypass a refusal.
+
+The default command deadline is 30 seconds, with a 60-second maximum. Commands are limited to 2048 UTF-8 bytes, with a shared 64 KiB text-output cap and explicit truncation. Results include the actual exit code, stdout, stderr and timeout/cancellation status. Output goes to the current model: do not run commands that print secrets, login state or other content you do not want sent. Interactive terminals, binary transfer and persistent background jobs are not supported. Ubuntu paths, working directories and environment are not inherited.
+
+**Stop Android Shell** cancels commands. Turning off Phone control, ending the task, turning off the screen or stopping the engine also invalidates execution. Cancellation attempts to terminate the owned process group; it cannot undo changes or requests already sent to Android services, nor guarantee cleanup of scripts that deliberately detach from the group. After timeout, disconnection or an unknown result, inspect the outcome rather than automatically retrying or replaying through another backend. This is not a sandbox: shell is not root and cannot arbitrarily read other apps’ private data.
 
 ## Ask DSH to do something
 
@@ -57,7 +73,7 @@ Whatever the settings, the bar closes when the reply ends.
 
 - **Stop** on the floating bar, or hold the ball for a second.
 - **Stop** on the "Operating your phone" card on the phone control page.
-- **Stop actions** on the engine notification. **Stop** on the same notification stops the whole engine.
+- **Stop phone control** on the engine notification. **Stop engine** on the same notification stops the whole engine.
 
 Stopping phone control also stops every reply in progress on this phone's engine.
 

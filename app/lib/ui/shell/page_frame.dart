@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../l10n/l10n.dart';
-import '../common/pressable.dart';
 import '../common/ui_trace.dart';
 import '../common/side_insets.dart';
 import '../settings/index/spot_anchor.dart' show seekSpot;
@@ -184,6 +183,7 @@ class _AppPageState extends State<AppPage> {
             children: [
               CustomScrollView(
                 controller: _controller,
+                physics: AppMotion.scrollPhysics(context),
                 slivers: [
                   SliverToBoxAdapter(child: SizedBox(height: top)),
                   if (header != null)
@@ -192,8 +192,17 @@ class _AppPageState extends State<AppPage> {
                       sliver: SliverToBoxAdapter(
                         child: ValueListenableBuilder<double>(
                           valueListenable: _offset,
-                          builder: (context, offset, child) =>
-                              Opacity(opacity: _headerOpacity(offset), alwaysIncludeSemantics: true, child: child),
+                          // Pulled past the top (only the fluid tier's lists go there), the
+                          // headline swells a little with the pull.
+                          builder: (context, offset, child) => Opacity(
+                            opacity: _headerOpacity(offset),
+                            alwaysIncludeSemantics: true,
+                            child: Transform.scale(
+                              scale: 1 + (-offset / 900).clamp(0.0, 0.1),
+                              alignment: AlignmentDirectional.topStart,
+                              child: child,
+                            ),
+                          ),
                           child: KeyedSubtree(key: _headerKey, child: header),
                         ),
                       ),
@@ -279,7 +288,9 @@ class GlassIconButton extends StatelessWidget {
     required this.onPressed,
     this.tooltip,
     this.grouped = true,
+    this.tier = GlassTier.chrome,
     this.size = 44,
+    this.iconSize = 22,
     this.badge,
   });
 
@@ -287,7 +298,13 @@ class GlassIconButton extends StatelessWidget {
   final VoidCallback? onPressed;
   final String? tooltip;
   final bool grouped;
+
+  /// On glass already (the drawer), [GlassTier.pill]: a blur over a blur shows bands.
+  final GlassTier tier;
   final double size;
+
+  /// The glyph in it; smaller buttons in a page's own chrome shrink it.
+  final double iconSize;
 
   /// Small widget pinned to the top-right corner (e.g. a status dot).
   final Widget? badge;
@@ -299,16 +316,15 @@ class GlassIconButton extends StatelessWidget {
     Widget button = SizedBox.square(
       dimension: size,
       child: GlassSurface(
-        tier: GlassTier.chrome,
+        tier: tier,
         circle: true,
         grouped: grouped,
         onTap: onPressed,
         child: Center(
-          child: Icon(icon, size: 22, color: enabled ? scheme.onSurface : DshColors.of(context).textDisabled),
+          child: Icon(icon, size: iconSize, color: enabled ? scheme.onSurface : DshColors.of(context).textDisabled),
         ),
       ),
     );
-    button = Pressable(enabled: enabled, child: button);
     if (badge case final badge?) {
       button = Stack(
         clipBehavior: Clip.none,

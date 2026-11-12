@@ -30,6 +30,7 @@ import 'package:dsh_app/ui/settings/performance_page.dart';
 import 'package:dsh_app/ui/settings/personalization_page.dart';
 import 'package:dsh_app/ui/settings/privacy_page.dart';
 import 'package:dsh_app/ui/settings/settings_screen.dart';
+import 'package:dsh_app/state/app_info.dart';
 import 'package:dsh_app/ui/settings/index/spots.dart';
 import 'package:dsh_app/ui/settings/settings_widgets.dart';
 import 'package:dsh_client/dsh_client.dart';
@@ -49,6 +50,8 @@ import '../../shell/golden_harness.dart';
 /// Rows that carry no spot on purpose, by page: a choice in a list (the
 /// list's spot covers it) or a row that only shows for a moment.
 final Map<SettingsPageId, List<String Function(L10n)>> _unlisted = {
+  // The author's profiles are links, not settings to look up.
+  SettingsPageId.about: [(_) => AppInfo.author, (l) => l.hubAboutBilibili, (l) => l.hubAboutX, (l) => l.hubAboutGithub],
   SettingsPageId.performance: [
     (l) => l.performanceAuto,
     (l) => l.performanceFull,
@@ -223,12 +226,18 @@ void main() {
       SettingsPageId.pets,
       () => _app(tester, const PetSettingsPage(), _running()),
       // Once 「App 外显示」 is on.
-      absent: {'pet-display-when'},
+      absent: {'pet-display-when', 'pet-overlay-shows', 'pet-overlay-framing'},
     );
   });
 
   testWidgets('性能', (tester) async {
-    await _check(tester, SettingsPageId.performance, () => _app(tester, const PerformancePage(), _running()));
+    await _check(
+      tester,
+      SettingsPageId.performance,
+      () => _app(tester, const PerformancePage(), _running()),
+      // Only with animations on, which tests run without.
+      absent: {'fluid-motion'},
+    );
   });
 
   testWidgets('通知', (tester) async {
@@ -249,7 +258,7 @@ void main() {
 
   testWidgets('手机操控', (tester) async {
     await _check(tester, SettingsPageId.phone, () async {
-      await pumpPhone(tester, const PhoneControlScreen(), size: const Size(390, 3200));
+      await pumpPhone(tester, const PhoneControlScreen(), size: const Size(390, 4400));
     });
   });
 

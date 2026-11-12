@@ -57,6 +57,62 @@ String effortLabel(String id, [String? fallback]) => switch (id) {
   _ => fallback ?? id,
 };
 
+/// The model in a phone's open composer: a plain pill beside the +, the same weight as
+/// it, saying what this message goes out with and a tap from changing it.
+class ComposerModelPill extends ConsumerWidget {
+  const ComposerModelPill({super.key, required this.selection, required this.onSelected});
+
+  final ModelSelection? selection;
+  final ValueChanged<ModelSelection> onSelected;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = context.l10n;
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final catalog = ref.watch(currentModelCatalogProvider);
+    final effective = selection ?? catalog?.defaultSelection;
+    final effort = effective?.reasoningEffort;
+    final name = modelShortName(effective, catalog);
+    void open() => showModelSheet(context, current: effective, onSelected: onSelected);
+    return Semantics(
+      button: true,
+      label: [
+        l10n.viewModelLabel(name),
+        if (effort != null) l10n.viewModelEffortLabel(effortLabel(effort)),
+      ].join(l10n.viewListSeparator),
+      excludeSemantics: true,
+      onTap: open,
+      child: InkResponse(
+        key: const ValueKey('composer-model'),
+        onTap: open,
+        highlightShape: BoxShape.rectangle,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 36),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: ShapeDecoration(color: colors.onSurface.withValues(alpha: 0.06), shape: const StadiumBorder()),
+          // As wide as its words: the row's free space stays between it and the keys.
+          child: Center(
+            widthFactor: 1,
+            heightFactor: 1,
+            child: Text(
+              effort == null ? name : '$name ${effortLabel(effort)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.labelMedium?.copyWith(
+                fontSize: 12.5,
+                color: colors.onSurface,
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// 顶栏右侧的模型胶囊:"✦ V4 Pro · 高 ⌄"。换模型时宽度平滑过渡、文字淡变。
 ///
 /// 位置不够时依次让出:先收起「· 高」(读屏照读),再截短模型名,最后只留
@@ -74,17 +130,16 @@ class ModelChip extends ConsumerWidget {
   // the left reads the same as 8 + 4 on the right.
   static const _padStart = 12.0;
   static const _padEnd = 8.0;
-  static const _glyph = 14.0;
   static const _chevron = 16.0;
 
-  /// The narrowest the chip gets: the sparkle and the chevron, no words.
-  static const compactWidth = _padStart + _glyph + _chevron + _padEnd;
+  /// The narrowest the chip gets: the chevron, no words.
+  static const compactWidth = _padStart + _chevron + _padEnd;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = context.l10n;
     final theme = Theme.of(context);
-    final catalog = ref.watch(modelCatalogProvider).value;
+    final catalog = ref.watch(currentModelCatalogProvider);
     final effective = selection ?? catalog?.defaultSelection;
     final effort = effective?.reasoningEffort;
     final label = modelShortName(effective, catalog);
@@ -116,7 +171,6 @@ class ModelChip extends ConsumerWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(AppIcons.model, size: _glyph, color: theme.colorScheme.primary),
                   Flexible(
                     child: AnimatedSwitcher(
                       duration: quick,
@@ -339,11 +393,12 @@ Future<void> showModelSheet(
   BuildContext context, {
   required ModelSelection? current,
   required ValueChanged<ModelSelection> onSelected,
+  bool confirmSelection = false,
 }) {
   return showAppSheet<void>(
     context,
     isScrollControlled: true,
-    builder: (context) => _ModelSheet(current: current, onSelected: onSelected),
+    builder: (context) => _ModelSheet(current: current, onSelected: onSelected, confirmSelection: confirmSelection),
   );
 }
 
@@ -364,10 +419,11 @@ Future<void> showModelSheet(
 ///
 /// 渠道条只是筛选,不改当前选择;打开时停在当前模型所在的渠道。
 class _ModelSheet extends ConsumerStatefulWidget {
-  const _ModelSheet({required this.current, required this.onSelected});
+  const _ModelSheet({required this.current, required this.onSelected, required this.confirmSelection});
 
   final ModelSelection? current;
   final ValueChanged<ModelSelection> onSelected;
+  final bool confirmSelection;
 
   @override
   ConsumerState<_ModelSheet> createState() => _ModelSheetState();
@@ -375,6 +431,9 @@ class _ModelSheet extends ConsumerStatefulWidget {
 
 class _ModelSheetState extends ConsumerState<_ModelSheet> {
   late ModelSelection? _selection = widget.current;
+  late final Object _scope = ref.read(modelSelectionScopeProvider);
+
+  bool get _active => identical(_scope, ref.read(modelSelectionScopeProvider));
 
   /// The channel being browsed; null follows the selected model's.
   String? _channel;
@@ -390,7 +449,7 @@ class _ModelSheetState extends ConsumerState<_ModelSheet> {
 
   void _pickModel(ModelInfo model) {
     final view = ref.read(modelListViewProvider);
-    if (view.readOnly) return;
+    if (!_active || view.readOnly) return;
     final available = findModel(view.value, ModelSelection(provider: model.provider, model: model.id));
     if (available == null || !identical(available, model)) return;
     final keep = _selection?.reasoningEffort;
@@ -404,18 +463,19 @@ class _ModelSheetState extends ConsumerState<_ModelSheet> {
       _selection = next;
       _channel = model.provider;
     });
-    widget.onSelected(next);
+    if (!widget.confirmSelection) widget.onSelected(next);
   }
 
   void _pickEffort(String effort) {
     final view = ref.read(modelListViewProvider);
-    if (view.readOnly) return;
+    if (!_active || view.readOnly) return;
     final current = _selection;
     if (current == null) return;
     final available = findModel(view.value, current);
     if (available == null || !available.efforts.any((entry) => entry.id == effort)) return;
     final next = ModelSelection(provider: current.provider, model: current.model, reasoningEffort: effort);
     setState(() => _selection = next);
+    if (widget.confirmSelection) return;
     widget.onSelected(next);
     _close?.cancel();
     final settle = AppMotion.reduced(context) ? Duration.zero : AppMotion.standard + const Duration(milliseconds: 120);
@@ -430,6 +490,7 @@ class _ModelSheetState extends ConsumerState<_ModelSheet> {
     final catalogAsync = ref.watch(modelCatalogProvider);
     final view = ref.watch(modelListViewProvider);
     final catalog = view.value;
+    final active = identical(_scope, ref.watch(modelSelectionScopeProvider));
 
     final Widget body;
     var picking = false;
@@ -465,7 +526,7 @@ class _ModelSheetState extends ConsumerState<_ModelSheet> {
         );
       } else {
         picking = true;
-        body = _picker(groups, findModel(catalog, _selection), readOnly: view.readOnly);
+        body = _picker(groups, findModel(catalog, _selection), readOnly: view.readOnly || !active);
       }
     }
 
@@ -479,6 +540,30 @@ class _ModelSheetState extends ConsumerState<_ModelSheet> {
           children: [
             SheetTitleBar(catalog == null ? l10n.viewModelSelect : readListHeading(l10n.viewModelSelect, view.status)),
             body,
+            if (picking && widget.confirmSelection && !isValidModelSelection(catalog, _selection))
+              Padding(
+                padding: const EdgeInsets.fromLTRB(SheetTitleBar.inset, 16, SheetTitleBar.inset, 0),
+                child: Text(l10n.engineNewChatDefaultsSelectionUnavailable),
+              ),
+            if (picking && widget.confirmSelection)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(SheetTitleBar.inset, 20, SheetTitleBar.inset, 0),
+                child: FilledButton(
+                  onPressed: !active || view.readOnly || !isValidModelSelection(catalog, _selection)
+                      ? null
+                      : () {
+                          final currentView = ref.read(modelListViewProvider);
+                          if (!_active ||
+                              currentView.readOnly ||
+                              !isValidModelSelection(currentView.value, _selection)) {
+                            return;
+                          }
+                          widget.onSelected(_selection!);
+                          Navigator.of(context).pop();
+                        },
+                  child: Text(l10n.commonSave),
+                ),
+              ),
             // 「管理模型 ›」: 设置 › 模型, over the sheet (back returns here).
             if (picking) ...[const SizedBox(height: 12), const ManageModelsLink()],
           ],
@@ -939,7 +1024,13 @@ class _EmptyCatalog extends StatelessWidget {
       icon: AppIcons.noApiKey,
       title: l10n.viewModelNone,
       message: failure != null && failure.isNotEmpty ? failure : l10n.viewModelKeyHint,
-      action: FilledButton(onPressed: () => push(const ProvidersPage()), child: Text(l10n.viewModelManageProviders)),
+      // An empty picker has no selection to resume after provider management.
+      action: FilledButton(
+        onPressed: () =>
+            Navigator.of(context)
+                .pushReplacement<void, void>(MaterialPageRoute<void>(builder: (_) => const ProvidersPage())),
+        child: Text(l10n.viewModelManageProviders),
+      ),
     );
   }
 }
