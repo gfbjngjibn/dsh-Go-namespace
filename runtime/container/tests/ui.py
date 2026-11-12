@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""ui.py dump | tap TEXT [--nth N] | tapx TEXT [--nth N] | has TEXT : uiautomator helpers over adb. tap and has match a substring of text|content-desc (a line break shows as " / " in dump but is "\n" in the node); tapx matches the whole text exactly. Prefer tapx: a substring can hit a whole section and tap its centre."""
+"""ui.py dump | tap TEXT [--nth N] | tapx TEXT [--nth N] | has TEXT : uiautomator helpers over adb. tap and has match a substring of text|content-desc (a line break shows as " / " in dump but is "\n" in the node); tapx matches the whole text exactly. Prefer tapx: a substring can hit a whole section and tap its centre.
+Every command dumps, and a dump unbinds the app's accessibility service for about a second, which stops
+a turn that uses phone control: while the agent runs, watch it with trace.sh instead."""
 import re, subprocess, sys, time, xml.etree.ElementTree as ET
 ADB = [__import__("os").path.expanduser("~/android-sdk/platform-tools/adb")]
 def dump():

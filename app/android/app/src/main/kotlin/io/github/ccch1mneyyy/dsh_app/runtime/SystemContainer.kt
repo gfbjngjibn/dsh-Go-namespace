@@ -333,6 +333,64 @@ object SystemContainer {
         }
     }
 
+    private val ZONE = Regex("[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*")
+
+    /**
+     * The container keeps the phone's time zone, for systemd's services, cron and `su -`
+     * shells too, not only for the engine (its TZ). Called before every start: one that runs
+     * already has it for what it starts next (systemd watches /etc/localtime).
+     */
+    fun followTimezone(context: Context, log: (String) -> Unit) {
+        val zone = java.util.TimeZone.getDefault().id
+        try {
+            if (followTimezone(layout(context).rootfs, zone)) log("[dsh-app] system container time zone: $zone")
+        } catch (error: Exception) {
+            log("[dsh-app] system container keeps its time zone: ${error.message}")
+        }
+    }
+
+    /**
+     * Links rootfs/etc/localtime to [zone] in the image's own tzdata, as timedatectl would,
+     * and names it in etc/timezone where the image has one; true when it changed either.
+     * Throws, changing nothing, for a zone the image lacks or an etc that is not the rootfs's
+     * own (the container owns what is in its rootfs: see [dockerConfig]).
+     */
+    internal fun followTimezone(rootfs: File, zone: String): Boolean {
+        require(ZONE.matches(zone)) { "not a zone name: $zone" }
+        val root = rootfs.canonicalFile
+        val etc = File(root, "etc")
+        check(etc.isDirectory && etc.canonicalPath == etc.path) { "etc is not a plain directory of the rootfs" }
+        val zoneinfo = File(root, "usr/share/zoneinfo").canonicalFile
+        val file = File(zoneinfo, zone).canonicalFile
+        check(file.isFile && file.path.startsWith(zoneinfo.path + "/")) { "the image has no zone $zone" }
+        val nofollow = java.nio.file.LinkOption.NOFOLLOW_LINKS
+        // A temporary name renamed over the old one: the container never sees a half-written file.
+        fun replace(name: String, write: (java.nio.file.Path) -> Unit) {
+            val tmp = File(etc, ".$name.dsh-app").toPath()
+            java.nio.file.Files.deleteIfExists(tmp)
+            write(tmp)
+            java.nio.file.Files.move(tmp, File(etc, name).toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
+        var changed = false
+        val link = "../usr/share/zoneinfo/$zone"
+        val localtime = File(etc, "localtime").toPath()
+        if (!java.nio.file.Files.isSymbolicLink(localtime) || java.nio.file.Files.readSymbolicLink(localtime).toString() != link) {
+            replace("localtime") { java.nio.file.Files.createSymbolicLink(it, java.nio.file.Paths.get(link)) }
+            changed = true
+        }
+        val named = File(etc, "timezone").toPath()
+        val text = "$zone\n"
+        if (java.nio.file.Files.isRegularFile(named, nofollow) && String(java.nio.file.Files.readAllBytes(named)) != text) {
+            replace("timezone") { tmp ->
+                java.nio.file.Files.newByteChannel(tmp, setOf(java.nio.file.StandardOpenOption.WRITE,
+                    java.nio.file.StandardOpenOption.CREATE_NEW, nofollow)).use { it.write(java.nio.ByteBuffer.wrap(text.toByteArray())) }
+            }
+            changed = true
+        }
+        return changed
+    }
+
     /**
      * 「局域网访问容器」: dshns lets anything routed to the container's subnet in while
      * state/lan exists, and checks every two seconds, so a running container follows at once.

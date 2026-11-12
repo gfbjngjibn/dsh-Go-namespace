@@ -6,9 +6,10 @@
 
 ## 0. 现在到哪了
 
-- 分支 `system-container`，工作区干净，都已提交并推送到 fork：`09e4691`（第一期 + 存储、备份）、`6e688aa`（独立网络、Docker/Podman）、`1eaa590`（中继泄漏）、`c512310`、`66bb44e`（补内核后的一轮：必需内核项、pids、nft、IPv6）、`635f493`（交接）、`4017336`（2026-11-10 的一轮，见下一条），以及紧随其后的一个 docs 提交（交接拆分、`runtime/container/tests/` 的测试脚本）。
+- 分支 `system-container`，第八个会话为止都已提交并推送到 fork（第九个会话的一个提交还没推送，见下面）：`09e4691`（第一期 + 存储、备份）、`6e688aa`（独立网络、Docker/Podman）、`1eaa590`（中继泄漏）、`c512310`、`66bb44e`（补内核后的一轮：必需内核项、pids、nft、IPv6）、`635f493`（交接）、`4017336`（2026-11-10 的一轮，见下一条），以及紧随其后的一个 docs 提交（交接拆分、`runtime/container/tests/` 的测试脚本）。
 - **`4017336` 里有什么**：第七个会话的改动（tun/FUSE 设备节点、`/home` 放进容器存储、签名带 launcher、启动失败时的清理、`PhoneBridge` 重绑、「容器存储」文案；历史 §10 末尾和 §11），加上审查后的三处小改（提示词加了"拒绝 root 的程序用 `ubuntu` 跑"一条、monitor 忽略 SIGPIPE、`dshns run` 失败时也清理 cgroup；历史 §12）。平板上的 APK 11102027（launcher `d37e6799…`）就是这个提交的代码，已在真机验收。
 - **审查结论（2026-11-10，第八个会话）**：主线没有走歪。审查发现的问题和处理结果记在 §5 开头。
+- **第九个会话（2026-11-10 晚）做了 §6 第 1 步**：在 App 的新对话里，agent 没被提醒就用 `su - ubuntu` 跑了 PostgreSQL 的 `initdb`（数据放 `/home/ubuntu`、自己处理了属主），也真调通了一次 `mcp__phone__screen`。新发现：`su -` 会丢掉 App 传进来的 `TZ`。按用户的决定改成**容器时区跟随手机**（§1、§4），APK 11102106 真机验过。中间我在设备上对 App 数据目录跑了一次递归 `grep`，把平板搞到内核 OOM 崩溃重启（§2 那条警告），存储下次启动时自动重放了日志，没有损失。详情在历史 §13、§14。代码、测试、文档和 `trace.sh` 是**一个提交，还没推送**。测试用的 PostgreSQL 已清掉，三个测试对话留在 App 里。
 - 平板当前：APK 11102027；容器是备份 Y 恢复的（`/home` 在存储上），装着 docker.io 和 podman（各有一个 alpine）；引擎在容器里（3080），手机操控 relay 连着，无障碍服务绑定着；Docker 接管开。`Download/DSH-Go/backups` 里有 11-07 14:46 的一份和 11-10 的两份（X 15:14 旧格式、Y 15:26 新格式），都含对话和 API 配置，要不要删由用户决定。
 
 ## 1. 用户已经拍板的决定
@@ -22,6 +23,7 @@
 - **只面向自己补过内核的设备**，不支持原厂内核；新补的内核选项是必需项，缺了不让启动。不做内存/CPU 限制（Android 把这些控制器放在 cgroup v1），不用 k8s，不补 `CGROUP_DEVICE`（历史 §9）。
 - **存储与备份**：容器存储是 32 GB 稀疏 ext4 镜像（`files/system/storage.img`，不放 `/data/adb`），引擎页可「扩容 16 GB」；「删除系统容器」连存储一起删；备份是 容器系统 + 存储 + `/root`，只走 App 里的按钮。被别的 App 检测时让用户先「退出 DSH Go（含容器）」，不用 `ksud kernel nuke-ext4-sysfs`。
 - **网络**：容器有自己的网络命名空间，经 NAT 上网，默认跟 App 当前的网络（VPN 开时跟 `tun0`）；宿主 loopback 用 TCP 中继；Docker 的 `daemon.json` 由 App 接管（默认开）；「局域网访问容器」默认关。
+- **容器的系统时区跟随手机**（2026-11-10 定，两种做法里用户选了这一种）：不只修 `su - ubuntu`，systemd 服务、cron、日志也要对；手机换时区后等下次启动引擎才同步。
 - **设备节点**：容器里的 `/dev/net/tun`、`/dev/fuse` 由 monitor 自建。不 chmod、chown 宿主的节点；不把宿主的 `/dev/loop*`、`/dev/block` 绑进容器。
 - **`/home` 在容器存储里**，和 Docker 共用一块，不另挂；`/root` 不挪进存储。界面上叫「容器存储」。
 - **这一版不做 / 不测**：`/sys` 不重挂；热点不测（平板不能插卡）；R3（VPN 锁定时的阻止规则）不测。
@@ -47,10 +49,13 @@
   kill $H; rm -f $F
   ```
   不要用 `</dev/null`（命令会立刻被结束，退出码 143），也不要在 `su -c` 里套多层引号。
+- **不要在设备上对 App 的数据目录跑递归 `grep -r`（或任何会整段读文件的命令）**：`files/system/storage.img` 是 32 GB 的稀疏文件，几乎全是零、没有换行，toybox 的 `grep` 按行读、会把整个文件当成一行读进内存（实测 200 MB 稀疏文件峰值 RSS 约 390 MB）；而 `adb shell`（含 `su`）起的进程都继承 adbd 的 `oom_score_adj -1000`，OOM 杀不掉它。第九个会话这样跑了一次：内核把别的进程（连 system_server、容器）杀光后 "Kernel panic - not syncing: System is deadlocked on memory"，平板重启。找文件用 `find -name`，搜内容先限定目录（比如 `files/runtime/logs`）或用 `grep --exclude=storage.img`。崩溃记录在 `/data/persist_log/backup/SYSTEM_LAST_KMSG.txt`（上一次开机的 kmsg），`getprop persist.sys.oplus.abnormalreboot_type` 是 `dump` 表示内核崩溃。
   `runtime/container/tests/cx.sh` 是这段的封装。
 - Git：这是用户自用的分叉，推到用户自己的 fork（公开）：远端 `fork` = https://github.com/gfbjngjibn/dsh-Go-namespace ，分支 `system-container`；`origin` 是上游，**绝不推送**。本仓库的 git 配置（只在本仓库）：`user.name gfbjngjibn`，`user.email 74477599+gfbjngjibn@users.noreply.github.com`（**不要用用户的真实邮箱**），`credential.helper` 是 Windows 的 Git Credential Manager。推送要在 Bash 沙箱外执行。只在用户要求时提交、推送；只暂存明确路径。已推送的提交见 §0。
   - 第一次推送时带了用户的真实邮箱（提交 `30425e7`），已改成 noreply 并 force-push，但 GitHub 仍能按 SHA 查到这个旧提交。**用户决定不处理（2026-11-03："那个邮箱的事情不用管了"），不要再提起，也不要建议联系 GitHub Support 或删 fork**；新提交照样只用 noreply 邮箱。
 - 界面自动化：`uiautomator dump` 能拿到 Flutter 的语义节点（文字和坐标），比截图可靠。脚本在 `runtime/container/tests/`（`ui.py`、`sw.py`、`stop-engine.sh`、`restart-engine.sh`）。**按钮一律按整段文字精确匹配（`ui.py tapx`）或按开关的 checkable 节点去点**：子串匹配会命中整个区块、点在区块中心（第七个会话就这样误关过「接管 Docker 配置」）。
+  - **agent 在用手机操控时不要 `uiautomator dump`**（`ui.py` 的每个子命令都会 dump）：dump 会把 App 的无障碍服务断开约 1 秒，App 当成停止请求，那一轮被中止（第九个会话就这样断过一次）。发完消息用 `runtime/container/tests/trace.sh` 从会话记录看 agent 做了什么，这一轮结束后再 dump。
+  - 给 agent 发消息只能用 ASCII（`adb shell input text`，空格写 `%s`）：用英文写，末尾加 "Please reply in Chinese."。做法见 `runtime/container/tests/README.md`。
 - 测试：
   - Kotlin：`cd app/android && ./gradlew :app:testArm64DebugUnitTest`
   - Dart：`DSH_TEST_FONT_DIR=<放 NotoSansCJK-{Regular,Bold,Light}.ttc 的目录> env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY flutter test ...`。本机只有 Regular 和 Bold，Light 用 Regular 的软链顶替。
@@ -131,6 +136,7 @@
 - **App（Kotlin）**：`runtime/SystemContainer.kt`（安装、启动、签名、存储、备份恢复、Docker 配置）、`SystemCheck`（检查页 25 项，其中 10 个必需内核选项）、`RootShell`、`QuitActivity`、`RuntimeController`（偏好、失败回退）、`DshProcess`、`GuestSetup`（给 agent 的环境说明）、`phone/PhoneBridge.kt`（在 `10.213.0.1` 上只对容器网段监听）。
 - **App（Dart）**：`lib/ui/engine/system_container_section.dart`（引擎页的系统容器区块）、诊断页的开关和检查表单；文案在 `lib/l10n/parts/phone_{zh,en}.arb`。
 - **容器签名**（不同就先停再起）= runtime 版本 + launcher 的 sha256（取自 `system.json`）+ 启动参数（不含启动器路径）+ 接管 Docker 时的整份 `daemon.json`。
+- **时区**（`SystemContainer.followTimezone`，`RuntimeController` 在写 Docker 配置之后、启动容器之前调）：把 rootfs 的 `etc/localtime` 换成指向 `../usr/share/zoneinfo/<手机时区>` 的软链接（临时名再 rename，和 `timedatectl` 一样的形式），镜像有 `etc/timezone` 就同步改写；没变就什么都不做、不写日志，变了记一行 "system container time zone: …"。镜像的 tzdata 里没有这个时区（或者名字不像时区）、`etc` 不是 rootfs 自己的目录时不动，记一行 "keeps its time zone"。**不进签名**：rootfs 就是容器的 `/`，容器在跑时新起的进程和 systemd 服务立刻读到新值（实测），不用重启。引擎进程另外仍有 `TZ`。
 - **启动失败**：App 记下失败时的 runtime 版本，之后改用直接或兼容启动，直到用户重新打开「系统容器启动」开关。
 
 ## 5. 已知问题 / 没验证的
@@ -144,6 +150,10 @@
 - **`PhoneBridge` 那个 "Socket closed" 的原因**（审查时凭对 AOSP 的记忆，没验证）：多半是 netd 在接口地址被删时销毁绑在该地址上的 socket，监听 socket 变成关闭状态，Android 把 `accept` 的 EINVAL 报成 "Socket closed"。如果是这样，旧 socket 确实不能再用，"清掉重绑"是正解。
 - **`/home` 放进存储的收益原来没人用到**：agent 以容器 root 在 `/root`（f2fs）工作，`/home/ubuntu` 默认没人用。现在提示词里让 agent 在程序拒绝 root 时切到 ubuntu，`/home` 才有了使用者。见 §6「agent 以非 root 用户工作」。
 
+### 2026-11-10 agent 实测发现的（第九个会话）
+
+- **`su - ubuntu` 下的程序是 UTC**：App 把手机时区以 `TZ` 传给引擎（`RuntimeController.kt:508`），agent 的 root shell 有它；`su -` 清环境，容器的系统时区又是 `Etc/UTC`，所以 `ubuntu` 跑的 `initdb` 选了 UTC。`su - ubuntu -w TZ -c` 能保留（实测）。不经过 agent shell 的程序（systemd 服务、cron、Docker 守护进程）本来就一直是 UTC。——**已改**：容器的系统时区跟随手机（§4「时区」），真机上 root、`su - ubuntu`、systemd 服务、journal 都是 `+08:00`（历史 §14）。
+
 ### `/home`、设备节点、签名（第七个会话）
 
 - **App 从宿主侧读不到 `/home` 里的文件**：`GuestFiles` 按系统容器的 rootfs 找文件，`/home` 现在只挂在 monitor 和容器的命名空间里。`/var/lib/docker` 等一直如此。
@@ -154,7 +164,7 @@
 - **`system.json` 的 `launcher.sha256` 和 APK 里 `libdshns.so` 的字节不同**（gradle 打包时又 strip 了一次）：签名用的是前者，不影响用途，只是不能拿它核对设备上的文件。
 - **启动失败后 `state/storage.dev` 会留下**，内容过时但没人用它判断状态。
 - **引擎页「容器存储」的用量不实时刷新**，要等下一次状态事件。
-- **第七个会话之后没有在新对话里真调过一次 `mcp__phone__*`**（只看了无障碍绑定和 relay 的 TCP 连接）。
+- ~~第七个会话之后没有在新对话里真调过一次 `mcp__phone__*`~~：第九个会话调通了 `mcp__phone__screen`（历史 §13）。
 
 ### Docker / Podman
 
@@ -186,10 +196,10 @@
 
 ## 6. 下一步和还没定的方向
 
-1. **新对话里让 agent 真用一次 `su - ubuntu -c`**（比如装 PostgreSQL 跑 `initdb`），看提示词那一条够不够用；顺便真调一次 `mcp__phone__*`。
+1. ~~新对话里让 agent 真用一次 `su - ubuntu -c`，顺便真调一次 `mcp__phone__*`~~：**第九个会话做了，都过了**（历史 §13）。提示词那一条够用，审查后建议的「复制后 `chown`」这次 agent 自己做了，先不加。剩下的是时区（第 4 条）。
 2. **测 VPN 开关、熄屏/Doze、后台**：容器和引擎是否跟着 App 的路由表，netd 清规则后 2 秒内是否补回。
 3. 视需要支持容器内 `reboot`（monitor 重新启动容器）和容器状态的定期刷新。
-4. **App 里 agent 提过、核实后可以做、用户还没定的**：重挂 `/sys`、时区跟随手机（容器是 UTC）、日志上限（`daemon.json` 的 `log-opts`、journald 的 `SystemMaxUse`）、`/sdcard` 只读档。它提的"宿主写 cgroup 就能限内存""把宿主 `/dev/loop*` 绑进容器""`lazy_itable_init=0`"是错的或不该做。
+4. **App 里 agent 提过、核实后可以做、用户还没定的**：重挂 `/sys`、~~时区跟随手机~~（第九个会话做了，§4「时区」）、日志上限（`daemon.json` 的 `log-opts`、journald 的 `SystemMaxUse`）、`/sdcard` 只读档。它提的"宿主写 cgroup 就能限内存""把宿主 `/dev/loop*` 绑进容器""`lazy_itable_init=0`"是错的或不该做。
 5. **给容器整体设内存上限**（没定）：`docker --memory`、`--cpus` 做不到（控制器在 v1）；可行的是 dshns 在 v1 memcg 里给整个容器设一个总上限，或者容器里装 earlyoom。
 6. **agent 以非 root 用户工作**（2026-11-10 和用户讨论过，用户原以为已经是非 root；**定下的做法是引擎保持 root，提示词里告诉 agent 某个程序拒绝 root 时用 `su - ubuntu -c '命令'`**，已加进 `GuestSetup.SYSTEM_EXTRA`。把引擎整体换成非 root 没有做，也没有定要做）。现状：引擎由 `dshns exec` 以容器 root 启动，`HOME=/root`，工作区 `/root/workspace`。同日在平板上以 ubuntu 实测：`/root` 是 `root:root 700`，进不去；`/sdcard` 报 "Bad address"；`su - ubuntu` 自带 `XDG_RUNTIME_DIR=/run/user/1000`；sudo 免密。整体换成 ubuntu 会碰到：
    - **根源是 uid 映射**（§4）：App 和容器共享的东西都是按 App uid 做的，只有容器 root 拿得到。

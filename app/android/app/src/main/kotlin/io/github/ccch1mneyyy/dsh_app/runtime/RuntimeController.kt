@@ -261,6 +261,7 @@ class RuntimeController private constructor(private val app: Context) : DshProce
             val takeover = dockerTakeover()
             if (takeover) SystemContainer.takeoverDocker(app) { log(it, "system") }
             else SystemContainer.releaseDocker(app) { log(it, "system") }
+            SystemContainer.followTimezone(app) { log(it, "system") }
             // The flag lives in the state dir, which deleting the container removes: the pref is the truth.
             SystemContainer.setLanAccess(app, lanAccess())
             val args = SystemContainer.startArgs(SystemContainer.layout(app), installer.rootfs, storage, android.os.Process.myUid(), android.system.Os.getgid(),

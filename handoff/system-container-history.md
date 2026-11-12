@@ -857,3 +857,91 @@
 - **回到用户的容器**：删掉 `files/systest` 和 `/data/local/tmp` 下的测试文件；打开 App，引擎自动启动，容器由 App 启动（`started` 里的 launcher 是 `d37e6799…`）。经 `cx.sh` 查：`systemctl is-system-running` = running、0 个失败单元；`/home` 在 `loop49[/home]`（ext4），monitor.log 没有 "moved"；`/dev/fuse`、`/dev/net/tun` 是 `crw-rw-rw- root root`；`/root/.dsh/AGENTS.md` 里有"某个程序拒绝以 root 运行时"那一条；手机操控 relay 从 `10.213.0.2` 连到 `10.213.0.1:44559`（冷启动：bridge 先起来时还没有网桥，5 秒后 "phone bridge: added 10.213.0.1:44559"）；Docker active、`daemon.json` 在；`pids.max` 16384；出网 204；无障碍服务绑定着；宿主 `127.0.0.1:3080` 只有一个中继在监听。
 - **没做的**：没有在新对话里让 agent 真用一次 `su - ubuntu`，也没有真调 `mcp__phone__*`；Dart 测试和 `flutter analyze` 没跑（没改 Dart）；`node --test runtime/tests` 没跑。
 - 副作用：打包前那次探测以 ubuntu 跑过 `sudo -n true`，在 `/home/ubuntu` 留下一个空的 `.sudo_as_admin_successful`（sudo 自己建的标记）。
+
+## 13. agent 以 `ubuntu` 跑程序、手机操控的实测（2026-11-10 晚，第九个会话，APK 11102027，只改文档）
+
+做的是入口文档 §6 第 1 步：在 App 里开新对话，让 agent 真用一次 `su - ubuntu`，顺便真调一次 `mcp__phone__*`。没改代码、没重新打包；平板上仍是 APK 11102027。
+
+### 怎么发消息
+
+`ui.py tapx 新对话` → 点输入框 → `adb shell "input text '...'"`（空格写成 `%s`）→ `ui.py has` 核对全文 → `ui.py tapx 发送`。搜狗输入法没有把 `input text` 当拼音（试过 `abc%sdef`，原样进了输入框）。中文发不了（设备上的 `cmd clipboard` 是 "No shell command implementation"，没装 ADBKeyBoard），所以消息用英文写、末尾加 "Please reply in Chinese."。引擎的 HTTP 接口要启动 token 换 cookie，没走那条路。
+
+agent 的每一步从会话记录里读：`/root/.dsh/sessions/--root-workspace--/session-<id>/session.v4.jsonl.zstd`（zstd 压缩的 JSONL，事件类型有 `user/message`、`assistant/message`、`tool/call`、`tool/result`、`turn/end` 等），经 `cx.sh` 以 base64 取回本机解压。已做成 `runtime/container/tests/trace.sh`（带 `trace.py`）。界面上的轨迹会把命令和输出截断。
+
+### 测试 1：PostgreSQL `initdb`（对话「搭建临时 PostgreSQL 测试实例」，`session-f9d05e63`）
+
+消息（故意不提 `ubuntu`、`su`、`/home`）："Set up a throwaway PostgreSQL instance for testing: make a fresh cluster with initdb, not the Debian managed cluster or its systemd service, run it on port 5433, create a table, insert a row and read it back. Then tell me how to connect to it. Please reply in Chinese."
+
+1 分 01 秒、9 步完成。经过：
+
+1. 第一步的思考里直接引用了 AGENTS.md："initdb refuses to run as root; use `su - ubuntu -c '...'`. Also ubuntu can't access /root, so put data dir in /home/ubuntu."。同一步就跑了 `id ubuntu` 和 `su - ubuntu -c 'id -u; echo $HOME'` 确认，还 `df -h /home` 看了存储（`/dev/block/loop49 32G`）。**从头到尾没有以 root 跑 `initdb` 再被拒**。
+2. `apt-get install -y postgresql postgresql-contrib`（33 秒），Debian 的 `main` 集群随之建好（5432）；它 `systemctl stop` + `disable` 了这个服务，免得混淆。
+3. `install -d -o ubuntu -g ubuntu -m 700 /home/ubuntu/pgtest ...`，然后 `su - ubuntu -c 'initdb -D /home/ubuntu/pgtest/data -U postgres --auth-local=trust ...'`。以 root 用 heredoc 写的 `postgresql.conf`、`pg_hba.conf` 随后 `chown ubuntu:ubuntu`——审查后担心的「root 复制进 `/home/ubuntu` 的文件 ubuntu 改不了」，这次它自己处理了。
+4. `su - ubuntu -c 'pg_ctl ... -w start'`，监听 `0.0.0.0:5433` 和 `[::]:5433`；建库、建表、插一行、读回；分别经 `127.0.0.1:5433` 和 `10.213.0.2:5433` 用 TCP 连上。
+5. 回复：连接信息表、读写结果、启停命令（注明要以 `ubuntu` 跑）、`trust` 只做测试的提醒、清理办法。
+
+**发现的问题：`su -` 丢掉了时区。** apt 以 root 建的 `main` 集群选了 `Asia/Shanghai`，`su - ubuntu` 下的 `initdb` 选了 `Etc/UTC`，读回的 `created_at` 是 `+00`。原因：
+- App 启动引擎时把手机的时区放进环境（`RuntimeController.kt:508`，`env["TZ"] = TimeZone.getDefault().id`），引擎和 relay 的进程环境里都是 `TZ=Asia/Shanghai`，agent 的 root shell 继承了它。
+- 容器的系统时区是 `Etc/UTC`（`/etc/localtime -> ../usr/share/zoneinfo/Etc/UTC`，`/etc/timezone` 也是）。`su -` 是登录 shell，清掉环境，`ubuntu` 下的程序就回到 UTC。
+- agent 发现后用 `ALTER DATABASE demo SET timezone = 'Asia/Shanghai'` 补了一下。
+- 实测（容器里，`TZ=Asia/Shanghai`）：`su - ubuntu -c date` 是 `UTC+0000`；`su - ubuntu -w TZ -c date` 是 `CST+0800`（util-linux 2.39.3 的 `-w`/`--whitelist-environment`）；`systemd-run --wait --pipe date` 是 `UTC+0000`。也就是说，**不经过 agent shell 的程序——systemd 服务、cron、Docker 的守护进程——本来就一直是 UTC**，`su -` 只是又多了一处。根治是让容器的系统时区跟手机（入口文档 §6 第 4 条，用户还没定）。
+
+清理（经 `cx.sh`）：`pg_ctl stop`；删 `/home/ubuntu/pgtest`；按 `/var/log/apt/history.log` 里这次安装的 `Install:` 行 purge 了 17 个包（postgresql、postgresql-16、-contrib、-client-16、-common、-client-common、libpq5、libllvm17t64、libxslt1.1、sysstat、ssl-cert、libsensors5、libsensors-config 和 4 个 perl 库）；删 `/var/lib/postgresql`、`/etc/postgresql*`、`/var/log/postgresql`、用户 `postgres`、组 `ssl-cert`。之后没有相关包、没有 5432/5433 的监听、没有 postgresql 的 unit，`systemctl is-system-running` = running。`/home/ubuntu` 里的 `.cache`、`.config`、`.local`、`t`、`.sudo_as_admin_successful` 是之前几轮留下的，没动。
+
+### 测试 2：`mcp__phone__screen`（对话「用手机控制工具读取屏幕内容」「读取手机屏幕内容并总结」）
+
+消息："Use the phone control tools to read what is on the screen right now, and summarize it in two or three sentences. Please reply in Chinese."（发之前看过 `dumpsys accessibility`，Bound services 里有「DSH 手机操控」。）
+
+- **第一次（`用手机控制工具读取屏幕内容`）被中止**：`mcp__phone__screen` 0.1 秒内返回了 32 项的屏幕结构（就是 DSH Go 自己的对话页），回复写到一半，这一轮以 `aborted`/`user` 结束，界面显示「已停止」。原因是我在用 `ui.py has` 轮询：每次 `uiautomator dump` 都注册一个 UiAutomation（logcat：`Registering UiTestAutomationService (id=com.android.server.accessibility/UiAutomation, flags=0x0)`），不带 `FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES`，系统就把别的无障碍服务断开，紧接着 `DshA11y: accessibility service gone: 无障碍服务已关闭`，约 1 秒后 `accessibility service connected`。`PhoneA11yService.teardown()` → `onStopRequested()` → 正在跑的手机操控任务被停掉，这一轮跟着中止。是测试方法的问题，不是 App 的问题（正常使用时没有人跑 uiautomator）。
+- **第二次（`读取手机屏幕内容并总结`）**：发完消息等 40 秒不碰屏幕再看。1 次工具调用（返回 33 项），回复完整、内容对（"当前屏幕显示的是 DSH 手机 App 本身……"），`turn/end` 的 reason 是 `completed`。
+- 两次的会话开始时都有一条 "The approval policy changed from "ask" to "never" (changed by the user)"：新对话先是 `workspace-write`/`ask`，随即被 App 切到 `danger-full-access`/`never`（界面上「已切换为完全权限」），这是用户的默认设置。
+
+### 结论
+
+- 提示词那一条够用：agent 没被提醒就选了 `su - ubuntu`，数据放进 `/home/ubuntu`，自己处理了属主。审查后建议的「复制后 `chown`」这次没有需要，先不加。
+- 新问题只有时区，归到入口文档 §6 第 4 条「时区跟随手机」一起定。可选的做法：提示词改成 `su - ubuntu -w TZ -c`（只修 `su` 这一处）；或者容器启动时把 `/etc/localtime` 设成手机的时区（systemd 服务、cron、日志都对，手机换时区后要等下次启动容器）。
+- 测试方法：agent 用手机操控时不能 dump 界面；进度用 `trace.sh` 看。
+
+### 本轮改的文件（都是文档和测试脚本，和 §14 的时区改动一起提交）
+
+- `HANDOFF-system-container.md`：§0、§2（界面自动化）、§5、§6 第 1 条和第 4 条。
+- 本文：本节。
+- `runtime/container/tests/`：新增 `trace.sh`、`trace.py`；`README.md` 加了这两个、发消息的办法、uiautomator 断开无障碍的注意事项；`ui.py` 的说明加了同一条警告。
+
+## 14. 容器时区跟随手机（2026-11-10 定、2026-11-12 验完，第九个会话，APK 11102106）
+
+§13 发现 `su - ubuntu` 下的程序是 UTC。给用户的两种做法：提示词改成 `su - ubuntu -w TZ -c`（只修这一处），或者容器的系统时区跟手机（systemd 服务、cron、日志也对）。用户选了第二种。
+
+### 改动
+
+- `SystemContainer.followTimezone(context, log)`：取 `TimeZone.getDefault().id`，调下面这个，变了就记一行 "[dsh-app] system container time zone: <zone>"，抛异常就记 "[dsh-app] system container keeps its time zone: <原因>"。
+- `SystemContainer.followTimezone(rootfs, zone)`（`internal`，单测直接调）：
+  - `zone` 要匹配 `[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*`（挡住 `..`、`GMT+08:00` 这类）；`rootfs/etc` 必须是 rootfs 自己的目录（`canonicalPath == path`，和 `dockerConfig` 同一个规矩：rootfs 里的东西归容器，里面的软链接不能让 App 写到别处）；`usr/share/zoneinfo/<zone>` 解析后必须是 zoneinfo 下面的普通文件（tzdata 里的链接名，比如 Android 还在报的 `Asia/Calcutta` → `Kolkata`，可以用）。
+  - `etc/localtime` 不是指向 `../usr/share/zoneinfo/<zone>` 的软链接时：先删 `etc/.localtime.dsh-app`，在那里建软链接，再 `ATOMIC_MOVE` + `REPLACE_EXISTING` 改名过去（rename(2)，替换的是链接本身，不跟随）。
+  - 镜像有普通文件 `etc/timezone`、内容不同时：同样走临时名 `etc/.timezone.dsh-app`，用 `CREATE_NEW` + `NOFOLLOW_LINKS` 写（容器抢先放一个同名软链接只会让这次失败，不会让 App 写到别处），再改名。没有 `etc/timezone` 的镜像不新建。
+  - 返回是否改了东西。
+- `RuntimeController`：在写/收回 Docker 配置之后、`setLanAccess` 和 `SystemContainer.start` 之前调 `followTimezone`。每次走系统容器路径启动引擎都会调，不管容器要不要重启。
+- **不进容器签名**：rootfs 就是容器的 `/`（monitor 只是把它自绑定一次），App 在宿主侧改的链接容器里立刻可见；手机换时区不该为此重启容器（会打断 Docker 里跑的东西）。代价：已经在跑的进程要看它自己什么时候重读（glibc 在 `localtime()` 时会检查 `/etc/localtime` 有没有变，systemd 的 1 号进程监视这个文件），新起的进程一定是新值。
+- 引擎进程的 `TZ`（`RuntimeController.kt` 里原来那行）保留。提示词、文案、FAQ 都没改。
+- 测试（`SystemContainerTest`）：
+  - `theContainerTakesThePhonesTimeZoneFromItsOwnTzdataOnce`：UTC → `Asia/Shanghai`（链接和 `etc/timezone` 都改、第二次返回 false、`etc` 里不留临时文件）；`Asia/Calcutta` 这种 tzdata 里的链接名；没有 `etc/timezone` 的镜像不新建。
+  - `aZoneTheImageLacksOrAnEtcOutsideTheRootfsChangesNothing`：`Mars/Olympus`、`Asia`（目录）、`Asia/Out`（指到 zoneinfo 外面的软链接）、`../../../etc/passwd`、`GMT+08:00`、空串都抛异常且什么都不改；`etc` 被换成指向 rootfs 外面的软链接时抛 `IllegalStateException`，外面的目录不多出文件、原文件不变。
+
+### 检查和验证
+
+- Kotlin：`./gradlew :app:testArm64DebugUnitTest` 793 个通过（原 791 + 新 2）。没改 Dart、文案、手册，`flutter analyze`、Dart 测试、`l10n_merge --check`、`guide_sync --check` 没跑。dshns 没改。
+- 打包：`tooling/build-apk.sh -f arm64` → APK 11102106（310 MB），`git checkout app/pubspec.lock`；`exec-in` 传上去、两边 sha256 一致（`d47d1be8…`）、`pm install -r -t`。
+- 2026-11-10 21:09 装上、打开 App：引擎照常起来，**容器没重启**（`init.pid` 装前装后都是 `11074 28305725`，dshns 没变所以签名没变）；`rootfs/etc/localtime -> ../usr/share/zoneinfo/Asia/Shanghai`、`etc/timezone` = `Asia/Shanghai`、`etc` 里没有临时文件；`files/runtime/logs/dsh.log` 有 "system container time zone: Asia/Shanghai"。
+- 接着平板崩溃重启（见下一小节），容器内的检查到 2026-11-12 才做。那时容器已经被 App 起停过几次，最近一次由 App 正常启动（`system container running 18199`）；这次启动没有时区日志，因为链接已经是 `Asia/Shanghai`，符合"没变就不写"。经 `cx.sh`：
+  - `unset TZ` 的 root shell、`su - ubuntu`、`systemd-run --wait --pipe date` 都是 `CST+0800`；`timedatectl` 是 `Asia/Shanghai`；`journalctl` 的时间戳是 `+08:00`；引擎进程仍有 `TZ=Asia/Shanghai`；`systemctl is-system-running` = running。
+  - 容器在跑时改链接是否立刻生效：在容器里把 `/etc/localtime` 临时指到 `Europe/Berlin`，新起的 systemd 服务和 `su - ubuntu` 都是 `CET+0100`；改回 `Asia/Shanghai` 后新服务是 `CST+0800`。
+- 没测的：真的在手机上换时区（会改用户的系统设置）；`keeps its time zone` 那条路只有单测。
+
+### 我在设备上把平板搞崩了一次（2026-11-10 21:11）
+
+- **经过**：装好 APK 后，为了确认 App 写了日志，我在 `adb shell su` 里跑了 `grep -rls 'system container time zone' /data/user/0/io.github.ccch1mneyyy.dsh_app/files`。这条命令找到了 `dsh.log`，接着读到 `files/system/storage.img`（名义 32 GB，实际只占 75 MB，其余是零、没有换行）。toybox 的 `grep` 按行读，把整个文件当一行往内存里读。`adb shell` 起的进程（含 `su` 之后）继承 adbd 的 `oom_score_adj -1000`，内核杀不掉它。
+- **内核日志**（`/data/persist_log/backup/SYSTEM_LAST_KMSG.txt`，上一次开机的 kmsg；同一份在 `.../minidump/SYSTEM_LAST_KMSG@...dat.gz`）：uptime 47410 秒（21:11:28）起持续回收内存，47423–47429 秒 OOM 依次杀了容器里的 `MainThread`（引擎）、`dockerd`、`containerd`、`systemd`，然后是蓝牙、systemui、电话、`system_server`、`iptables`、`libdshns.so`（monitor）……杀到没有可杀的进程，47429.94 秒（21:11:48）"Kernel panic - not syncing: System is deadlocked on memory"，随后 "Causing a QCOM Apps Watchdog bite!"。被杀进程的 anon-rss 都只有几十 MB 以内，被杀列表里没有 grep。21:12:22 开机完成，`persist.sys.oplus.abnormalreboot_type` = `dump`（内核崩溃），`ro.boot.bootreason` = `reboot`。我那条命令返回 exit 255（连接断在执行中），时间对得上。
+- **验证**：重启后实测 `adb shell` 和 `adb shell su` 的 `oom_score_adj` 都是 -1000；toybox `grep -c nomatch` 读一个 200 MB 的稀疏文件，峰值 RSS 约 390 MB。
+- **后果**：容器的存储在崩溃时是挂着的；下一次启动时 `e2fsck -p` 打出 "dsh-storage: recovering journal"，随后 "clean"，容器正常起来。`/home` 早就搬完，不在搬迁中。没有发现别的损失。
+- **以后**：入口文档 §2 加了警告——不要在设备上对 App 的数据目录跑递归 `grep`；找文件用 `find -name`，搜内容先限定目录或排除 `storage.img`；崩溃记录在哪看。拉回本机的 45 MB minidump（内存镜像，可能有隐私数据）已删，只留了 kmsg 文本在 scratchpad。
+- 另外一个容易犯的错（这一轮犯了两次）：`adb shell su -c 'a; b'` 只有 a 以 root 执行，后面的 `[ -d /proc/$P ]`、`ls` 以 shell 身份跑，看不到别人的进程、读不了 App 的目录，会误判"容器没起来""权限不够"。一律用 `adb shell su <<'EOF'`（入口文档 §2 早就写了）。

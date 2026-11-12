@@ -7,7 +7,8 @@
 | 脚本 | 在哪跑 | 做什么 |
 |---|---|---|
 | `cx.sh SCRIPT [TIMEOUT]` | 本机 | 把本地脚本放进用户的系统容器，以容器 root 跑。用 fifo 撑住 `dshns exec` 的 stdin（stdin 一关命令就被结束）。脚本跑完，它起的后台进程也一起没了。 |
-| `ui.py dump \| tap \| tapx \| has` | 本机 | `uiautomator dump` 后按文字找节点、点击。**用 `tapx`（整段文字精确匹配）**：`tap` 的子串匹配会命中整个区块、点在区块中心。 |
+| `ui.py dump \| tap \| tapx \| has` | 本机 | `uiautomator dump` 后按文字找节点、点击。**用 `tapx`（整段文字精确匹配）**：`tap` 的子串匹配会命中整个区块、点在区块中心。**agent 在用手机操控时不要跑它**（见「注意」）。 |
+| `trace.sh [N [CUT]]`（带 `trace.py`） | 本机 | 从会话记录读出引擎里最新（N=2 是上一个）对话里 agent 做了什么：用户消息、工具调用和结果（截到 CUT 字）、回复、每一轮怎么结束的（`turn ... ended`）。不碰屏幕，agent 跑着的时候也能用。 |
 | `sw.py LABEL [on\|off]` | 本机 | 读或切换一个开关（按 checkable 节点）。 |
 | `stop-engine.sh`、`restart-engine.sh` | 本机 | 从引擎页停止、重启引擎（界面是中文时）。 |
 | `prep.sh` | 容器（经 `cx.sh`） | 装测试工具，在 `/home/ubuntu/mig` 放一组测试文件（setuid、xattr、ACL、硬链接、稀疏文件等），记下 `/root/mig-before*.txt`。 |
@@ -46,5 +47,7 @@ EOF
 
 - `prep.sh` 会 `apt-get install` 一批包（acl、attr、sshfs、squashfuse、squashfs-tools、openssh-server、libfuse2t64），测完按 apt 历史 purge。
 - 不要用 toybox 的 `mount -o loop` 去看存储镜像：路径超过 64 字节时挂载失败，却会留下没有 autoclear 的 loop 设备（要 `losetup -d`）。
-- 拆分后重新上机跑过的有 `cx.sh`、`ui.py dump`、`runfail.sh`、`sigpipe.sh`（2026-11-10，APK 11102027）；其余只做过语法检查（`bash -n`、`py_compile`）。
+- **`uiautomator dump`（`ui.py` 的每个子命令都会先 dump）会把 App 的无障碍服务断开约 1 秒**：它注册的 UiAutomation 不带 `FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES`（logcat：`Registering UiTestAutomationService ... flags=0x0`，紧跟着 `DshA11y: accessibility service gone`）。App 把这当成停止请求，**正在用手机操控的那一轮会被中止**（会话记录里 `turn/end` 的 reason 是 `aborted`/`user`）。发完消息后不要用 `ui.py` 轮询，用 `trace.sh` 看进度，这一轮结束后再 dump。agent 不用手机操控时 dump 不影响它。
+- 拆分后重新上机跑过的有 `cx.sh`、`ui.py dump|tapx|has`、`runfail.sh`、`sigpipe.sh`、`trace.sh`（2026-11-10，APK 11102027）；其余只做过语法检查（`bash -n`、`py_compile`）。
+- 给 App 里的 agent 发消息：`ui.py tapx 新对话` → 点输入框（横屏时约在 `2100 2284`）→ `adb shell "input text '...'"`（空格写成 `%s`，只能是 ASCII；搜狗输入法不会把它当拼音）→ `ui.py has` 核对全文 → `ui.py tapx 发送`。中文发不了（设备上没有 `cmd clipboard`，也没装 ADBKeyBoard），用英文写、末尾加 "Please reply in Chinese."。
 - adb 传上去的可执行文件要先 `cp` 一份再执行，否则可能报 "Text file busy"。cgroup 文件的大小永远是 0，判断有没有内容要读出来，不能用 `[ -s ]`。

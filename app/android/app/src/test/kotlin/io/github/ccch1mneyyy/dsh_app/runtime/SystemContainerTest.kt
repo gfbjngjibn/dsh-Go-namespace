@@ -56,6 +56,63 @@ class SystemContainerTest {
         assertTrue(SystemContainer.signature("r15", args, dockerTakeover = true).contains("\"ip6tables\": true"))
     }
 
+    /** A rootfs on UTC, as the image comes: tzdata with [zones], etc/localtime and etc/timezone. */
+    private fun utcRootfs(vararg zones: String): File {
+        val root = java.nio.file.Files.createTempDirectory("rootfs").toFile()
+        for (zone in listOf("Etc/UTC") + zones) File(root, "usr/share/zoneinfo/$zone").apply { parentFile!!.mkdirs() }.writeText("TZif")
+        File(root, "etc").mkdirs()
+        java.nio.file.Files.createSymbolicLink(File(root, "etc/localtime").toPath(), java.nio.file.Paths.get("../usr/share/zoneinfo/Etc/UTC"))
+        File(root, "etc/timezone").writeText("Etc/UTC\n")
+        return root
+    }
+
+    private fun localtime(root: File) = java.nio.file.Files.readSymbolicLink(File(root, "etc/localtime").toPath()).toString()
+
+    @Test fun theContainerTakesThePhonesTimeZoneFromItsOwnTzdataOnce() {
+        val root = utcRootfs("Asia/Shanghai", "Asia/Kolkata")
+        try {
+            assertTrue(SystemContainer.followTimezone(root, "Asia/Shanghai"))
+            assertEquals("../usr/share/zoneinfo/Asia/Shanghai", localtime(root))
+            assertEquals("Asia/Shanghai\n", File(root, "etc/timezone").readText())
+            assertFalse(SystemContainer.followTimezone(root, "Asia/Shanghai"))
+            assertEquals(setOf("localtime", "timezone"), File(root, "etc").list()!!.toSet())
+            // Android still says Asia/Calcutta, which tzdata keeps as a link to Asia/Kolkata.
+            java.nio.file.Files.createSymbolicLink(File(root, "usr/share/zoneinfo/Asia/Calcutta").toPath(), java.nio.file.Paths.get("Kolkata"))
+            assertTrue(SystemContainer.followTimezone(root, "Asia/Calcutta"))
+            assertEquals("../usr/share/zoneinfo/Asia/Calcutta", localtime(root))
+            // An image without etc/timezone does not get one.
+            File(root, "etc/timezone").delete()
+            assertTrue(SystemContainer.followTimezone(root, "Asia/Shanghai"))
+            assertEquals(setOf("localtime"), File(root, "etc").list()!!.toSet())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun aZoneTheImageLacksOrAnEtcOutsideTheRootfsChangesNothing() {
+        val root = utcRootfs()
+        val elsewhere = java.nio.file.Files.createTempDirectory("elsewhere").toFile()
+        try {
+            File(root, "usr/share/zoneinfo/Asia").mkdirs()
+            java.nio.file.Files.createSymbolicLink(File(root, "usr/share/zoneinfo/Asia/Out").toPath(), java.nio.file.Paths.get("/etc/hostname"))
+            for (zone in listOf("Mars/Olympus", "Asia", "Asia/Out", "../../../etc/passwd", "GMT+08:00", "")) {
+                assertThrows(zone, Exception::class.java) { SystemContainer.followTimezone(root, zone) }
+                assertEquals("../usr/share/zoneinfo/Etc/UTC", localtime(root))
+                assertEquals("Etc/UTC\n", File(root, "etc/timezone").readText())
+            }
+            // The container made its etc a link out of the rootfs: the app writes nothing there.
+            File(elsewhere, "timezone").writeText("x\n")
+            File(root, "etc").deleteRecursively()
+            java.nio.file.Files.createSymbolicLink(File(root, "etc").toPath(), elsewhere.toPath())
+            assertThrows(IllegalStateException::class.java) { SystemContainer.followTimezone(root, "Etc/UTC") }
+            assertEquals(setOf("timezone"), elsewhere.list()!!.toSet())
+            assertEquals("x\n", File(elsewhere, "timezone").readText())
+        } finally {
+            root.deleteRecursively()
+            elsewhere.deleteRecursively()
+        }
+    }
+
     @Test fun execWithAForwardMapsTheAppLoopbackPort() {
         val proot = listOf("/lib/libproot.so", "--rootfs=/r", "--cwd=/root/workspace") + guest
         val command = SystemContainer.execCommand(layout, proot, 3080)
